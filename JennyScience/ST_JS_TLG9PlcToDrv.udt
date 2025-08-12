@@ -1,0 +1,62 @@
+﻿TYPE "ST_JS_TLG9PlcToDrv"
+VERSION : 0.1
+   STRUCT
+      STW1 : Struct
+         Tip_1 : Bool;
+         Tip_2 : Bool;
+         Fuehr : Bool := true;
+         Referenzieren_start : Bool;
+         res_12 : Bool;
+         res_13 : Bool;
+         res_14 : Bool;
+         res_15 : Bool;
+         Aus1 : Bool;
+         Aus2 : Bool := false;
+         Aus3 : Bool := false;
+         Freiwechsel : Bool := false;
+         Fahrverwerf : Bool;
+         Zwihalt : Bool;
+         Fahr_akt : Bool;
+         Stoer_ruecks : Bool;
+      END_STRUCT;
+      SATZ_ANW : Struct
+         res_8 : Bool;
+         res_9 : Bool;
+         res_10 : Bool;
+         res_11 : Bool;
+         res_12 : Bool;
+         res_13 : Bool;
+         res_14 : Bool;
+         MDI_aktiv : Bool := true;
+         Satz : Byte;
+      END_STRUCT;
+      STW2 : Struct
+         res_8 : Bool;
+         res_9 : Bool;
+         res_10 : Bool;
+         res_11 : Bool;
+         Master_Zykl_bit0 : Bool;
+         Master_Zykl_bit1 : Bool;
+         Master_Zykl_bit2 : Bool;
+         Master_Zykl_bit3 : Bool;
+         res_0_7 : Byte;
+      END_STRUCT;
+      MDIPos : DInt;
+      MDIVel : DInt;
+      MDIAcc : Int;
+      MDIDec : Int;
+      MDI_MOD : Struct
+         res_8_15 : Byte;
+         MDIMode : Bool := true;
+         res_1 : Bool;
+         res_2 : Bool;
+         res_3 : Bool;
+         res_4 : Bool;
+         res_5 : Bool;
+         res_6 : Bool;
+         res_7 : Bool;
+      END_STRUCT;
+   END_STRUCT;
+
+END_TYPE
+

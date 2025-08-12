@@ -1,0 +1,32 @@
+﻿TYPE "ST_JS_HMI"
+VERSION : 0.1
+   STRUCT
+      Eingang : Struct
+         Execute : Bool;   // Antrieb Einfachpositionieren
+         Referenzieren : Bool;   // Antrieb Referenzieren
+         Halt : Bool;   // Antrieb Haelt an
+         LimitForce { S7_SetPoint := 'True'} : DInt;   // Wert*10mA / nM
+         TargetPos : DInt;   // Wert in 0,000mm
+         Velocity { S7_SetPoint := 'True'} : DInt;   // SPEED 0,000mm [inc/s] 
+         Acceleration { S7_SetPoint := 'True'} : Int;   // ACC 0,000mm [inc/s2]
+      END_STRUCT;
+      Ausgang : Struct
+         InPos : Bool;   // Antrieb in Position
+         Betriebsbereit_KeineStoerung : Bool;   // Antrieb betriebsbereit keine Stoerung
+         ForceReached : Bool;   // Eingestellte max Kraft erreicht
+         KraftWertErreicht : Bool;   // Kraft-Messwert erreicht
+         Referenziert : Bool;   // Antrieb Referenziert
+         Error : Bool;   // Antriebsstoerung wirksam
+         Warning : Bool;   // Antriebswarnung wirksam
+         IForceActual : DInt;   // Aktuelle Kraft je nach Parameter
+         PositionActual : DInt;   // Aktuelle Position in 0,000mm
+         PositionModulo : DInt;   // Aktuelle Position in Applikation
+         ErrorState : DInt;   // Error State Baustein
+         Status : String;   // Status Baustein
+         FreigabeBedienungHMI : Bool;   // Bedienung am HMI freigegeben
+         FreigabeBewegung : Bool;   // Bewegung durch Anwenderprogramm freigegeben
+      END_STRUCT;
+   END_STRUCT;
+
+END_TYPE
+

@@ -1,0 +1,372 @@
+(************************************************************************************************************************
+BAUSTEINKOPF - VEREINFACHTE VERSION
+*************************************************************************************************************************
+    
+Ersteller: Vereinfachte Version                Datum: 12.08.2025       Vers.:1.00
+Basierend auf: S. Nock Original               Datum: 01.07.2022       Vers.:2.10
+    
+Beschreibung: Vereinfachte Version des Zimmer GEH Greifer-Codes mit nur den essentiellen Funktionen:
+- Motor ein-/ausschalten
+- Referenzfahrt (Homing)
+- Fahren zur BasePosition
+- Fahren zur WorkPosition (Außengreifen)
+- Fehlerbehandlung und Reset-Funktion
+    
+*************************************************************************************************************************
+KURZBESCHREIBUNG
+*************************************************************************************************************************
+        
+Diese vereinfachte Version enthält nur die grundlegenden Funktionen zur Steuerung des Zimmer-Greifers.
+Die Eingangsvariable "Inp_cmd_b_StepReset" setzt die Schrittkette zurück.
+
+Verfügbare Befehle:
+- "Inp_cmd_b_MotorON": Motor einschalten
+- "Inp_cmd_b_MotorOFF": Motor ausschalten (höchste Priorität)
+- "Inp_cmd_b_StartHoming": Referenzfahrt starten
+- "Inp_cmd_b_MoveToBase": Fahren zur BasePosition
+- "Inp_cmd_b_MoveToWork": Fahren zur WorkPosition
+- "Inp_cmd_b_DataTransfer": Datenübertragung zum Greifer
+
+*************************************************************************************************************************
+*)
+
+(*_______________________________________________________________________________________________________________________
+Prüfung ob sich OUTPUT Variablen zum Greifer geändert haben / Check if OUTPUT variables for the gripper have changed*)
+
+IF #i8_DeviceMode_old <> #Inp_i8_DeviceMode
+    OR #i8_GripForce_old <> #Inp_i8_GripForce
+    OR #i8_DriveVelocity_old <> #Inp_i8_DriveVelocity
+    OR #i16_BasePosition_old <> #Inp_i16_BasePosition
+    OR #i16_WorkPosition_old <> #Inp_i16_WorkPosition
+THEN
+    #Out_b_DataTransferRequired := TRUE;
+END_IF;
+
+(*_______________________________________________________________________________________________________________________
+Zeitüberwachung Datenübetragung / Time monitoring data transfer*)
+
+#ton_Timer_DataTransfer(
+                        IN := #Out_st_GripperData_OUT.i16_ControlWord = 1
+                        AND NOT #Out_b_DataTransferOK,
+                        PT := t#1s);
+
+(*_______________________________________________________________________________________________________________________
+Zeitüberwachung Bewegung / Time monitoring movement*)
+
+#ton_Timer_InMotion(
+                    IN := #b_Gripper_InMotion,
+                    PT := #Inp_t_MotionTimeout);
+
+(*_______________________________________________________________________________________________________________________
+Signaltriggerung / Triggering signals*)
+
+#rtrig_Timeout_DataTransfer(CLK := #ton_Timer_DataTransfer.Q);
+#rtrig_Timeout_InMotion(CLK := #ton_Timer_InMotion.Q);
+#rtrig_MotorON(CLK := #Inp_cmd_b_MotorON);
+#rtrig_MotorOFF(CLK := #Inp_cmd_b_MotorOFF);
+#rtrig_StartHoming(CLK := #Inp_cmd_b_StartHoming);
+#rtrig_DataTransfer(CLK := #Inp_cmd_b_DataTransfer);
+#rtrig_MoveToBase(CLK := #Inp_cmd_b_MoveToBase);
+#rtrig_MoveToWork(CLK := #Inp_cmd_b_MoveToWork);
+
+(*_______________________________________________________________________________________________________________________
+INPUT Variablen vom Greifer / INPUT variables from the gripper*)
+
+#Out_b_BasePosition := #Inp_st_GripperData_IN.b_BasePosition;
+#Out_b_WorkPosition := #Inp_st_GripperData_IN.b_WorkPosition;
+#Out_b_DataTransferOK := #Inp_st_GripperData_IN.b_DataTransferOK;
+#Out_b_Error := #Inp_st_GripperData_IN.b_Error;
+#Out_b_HomingPositionOK := #Inp_st_GripperData_IN.b_HomingPositionOK;
+#Out_b_MotorON := #Inp_st_GripperData_IN.b_MotorON;
+#Out_b_InMotion := #Inp_st_GripperData_IN.b_InMotion;
+#Out_b_MovementComplete := #Inp_st_GripperData_IN.b_MovementComplete;
+
+#Out_i16_Diagnose := #Inp_st_GripperData_IN.i16_Diagnose;
+#Out_i16_ActualPosition := #Inp_st_GripperData_IN.i16_ActualPosition;
+
+(*_______________________________________________________________________________________________________________________
+Rücksetzen der Schrittkette (schrittunabhängig) / Resetting the step sequence(step independently)*)
+
+IF #Inp_cmd_b_StepReset THEN
+    #i16_StepMotorOFF := 0;
+    IF #Out_i16_Diagnose = 16#400 THEN
+        #Out_st_GripperData_OUT.i16_ControlWord := 32768;    // Error Reset
+        #i16_Step := 5;
+    ELSE
+        #i16_Step := 0;
+    END_IF;
+END_IF;
+
+(*_______________________________________________________________________________________________________________________
+Motor ausschalten (schrittunabhängig ausgenommen bei "Homing") / Switching motor off (step independently except at "Homing"*)
+
+IF #rtrig_MotorOFF.Q
+    AND #Out_b_MotorON
+    AND #i16_StepMotorOFF = 0                         
+    AND (#i16_Step < 100 OR #i16_Step > 199) THEN
+    #Out_b_StepBusy := TRUE;                            
+    #Out_b_StepDone := FALSE;                           
+    #i16_Step := 1;
+    #i16_StepMotorOFF := 5;
+END_IF;
+
+(*_______________________________________________________________________________________________________________________
+Auslösung Zeitüberwachung Datenübetragung (schrittunabhängig) / Triggering time monitoring data transfer (step independently)*) 
+
+IF #rtrig_Timeout_DataTransfer.Q THEN
+    #Out_b_DataTransferError := TRUE;
+    #i16_Step := 990;
+END_IF;
+
+(*_______________________________________________________________________________________________________________________
+Auslösung Zeitüberwachung Bewegung (schrittunabhängig) / Triggering time monitoring movement (step independently)*)
+
+IF #rtrig_Timeout_InMotion.Q THEN
+    #Out_b_MotionError := TRUE;
+    #i16_Step := 990;
+END_IF;
+
+(*_______________________________________________________________________________________________________________________
+SCHRITTKETTE / STEP SEQUENCE*)
+
+CASE #i16_Step OF
+        
+    (* Initialschritt / Initial step *)
+    0:
+        #Out_b_DataTransferError := FALSE;
+        #Out_b_MotionError := FALSE;
+        #Out_b_StepBusy := FALSE;
+        #Out_b_StepDone := TRUE;
+        #b_Gripper_InMotion := FALSE;
+        #i16_Step := 1;
+        
+    1: (* idle *)
+        #i16_Step := 1;
+        
+        (* Motor einschalten / Switch on motor *)
+        IF #rtrig_MotorON.Q
+            AND NOT #Out_b_StepBusy
+            AND #i16_StepMotorOFF = 0 THEN         
+            #Out_b_StepBusy := TRUE;
+            #Out_b_StepDone := FALSE;
+            #i16_Step := 10;
+        END_IF;
+        
+        (* Referenzfahrt / Start homing *)
+        IF #rtrig_StartHoming.Q
+            AND NOT #Out_b_StepBusy
+            AND #i16_StepMotorOFF = 0 THEN         
+            #Out_b_StepBusy := TRUE;
+            #Out_b_StepDone := FALSE;
+            #i16_Step := 100;
+        END_IF;
+        
+        (* Datenübertragung / Data transfer *)
+        IF #rtrig_DataTransfer.Q
+            AND NOT #Out_b_StepBusy
+            AND #i16_StepMotorOFF = 0 THEN
+            #Out_b_StepBusy := TRUE;
+            #Out_b_StepDone := FALSE;
+            #i16_Step := 200;
+        END_IF;
+        
+        (* Fahrbefehl auf BasePosition / Drive command to BasePosition *)
+        IF #rtrig_MoveToBase.Q
+            AND NOT #Out_b_StepBusy
+            AND #i16_StepMotorOFF = 0
+            AND (#Out_i16_Diagnose = 0 OR #Out_i16_Diagnose = 16#307 OR #Out_i16_Diagnose = 16#313 OR #Out_i16_Diagnose = 16#10B) THEN
+            #Out_b_StepBusy := TRUE;
+            #Out_b_StepDone := FALSE;
+            #i16_Step := 500;
+        END_IF;
+        
+        (* Fahrbefehl auf WorkPosition / Drive command to WorkPosition *)
+        IF #rtrig_MoveToWork.Q
+            AND NOT #Out_b_StepBusy
+            AND #i16_StepMotorOFF = 0
+            AND (#Out_i16_Diagnose = 0 OR #Out_i16_Diagnose = 16#307 OR #Out_i16_Diagnose = 16#313 OR #Out_i16_Diagnose = 16#10B) THEN
+            #Out_b_StepBusy := TRUE;
+            #Out_b_StepDone := FALSE;
+            #i16_Step := 600;
+        END_IF;
+        
+    (* Fehler quittieren / Acknowledge error *)
+    5:
+        IF #Out_i16_Diagnose <> 16#400 THEN
+            #Out_st_GripperData_OUT.i16_ControlWord := 0;
+            #i16_Step := 0;
+        END_IF;
+        
+    (* Motor einschalten / Switch on motor *)
+    10:
+        #Out_st_GripperData_OUT.i8_DeviceMode := 2;         // Greifer-Reset
+        #Out_st_GripperData_OUT.i16_ControlWord := 1;       // DataTransfer
+        #i16_Step := 20;
+    20:
+        IF #Out_b_DataTransferOK THEN
+            #Out_st_GripperData_OUT.i16_ControlWord := 0;
+            #i16_Step := 30;
+        END_IF;
+    30:
+        IF NOT #Out_b_DataTransferOK THEN
+            #Out_st_GripperData_OUT.i8_DeviceMode := 3;     // Motor ON
+            #Out_st_GripperData_OUT.i16_ControlWord := 1;
+            #i16_Step := 40;
+        END_IF;
+    40:
+        IF #Out_b_DataTransferOK THEN
+            #Out_st_GripperData_OUT.i16_ControlWord := 0;
+            #i16_Step := 50;
+        END_IF;
+    50:
+        IF NOT #Out_b_DataTransferOK AND #Out_i16_Diagnose <> 1 THEN   
+            #i16_Step := 0;
+        END_IF;
+        
+    (* Referenzfahrt / Homing *)
+    100:
+        #Out_st_GripperData_OUT.i8_DeviceMode := 10;        // Standard Homing
+        #Out_st_GripperData_OUT.i16_ControlWord := 1;       // DataTransfer
+        #i16_Step := 120;
+    120:
+        IF #Out_b_DataTransferOK THEN
+            #Out_st_GripperData_OUT.i16_ControlWord := 0;
+            #i16_Step := 130;
+        END_IF;
+    130:
+        IF NOT #Out_b_DataTransferOK AND #Out_i16_Diagnose <> 16#305 THEN
+            #i16_Step := 0;
+        END_IF;
+        
+    (* Datenübertragung / Data Transfer *)
+    200:
+        IF NOT #Out_b_DataTransferOK THEN
+            #Out_st_GripperData_OUT.i8_DeviceMode := #Inp_i8_DeviceMode;
+            #Out_st_GripperData_OUT.i8_GripForce := #Inp_i8_GripForce;
+            #Out_st_GripperData_OUT.i8_DriveVelocity := #Inp_i8_DriveVelocity;
+            #Out_st_GripperData_OUT.i16_BasePosition := #Inp_i16_BasePosition;
+            #Out_st_GripperData_OUT.i16_WorkPosition := #Inp_i16_WorkPosition;
+            #Out_st_GripperData_OUT.i16_ControlWord := 1;
+            #i16_Step := 210;
+        END_IF;
+    210:
+        IF #Out_b_DataTransferOK THEN
+            #Out_st_GripperData_OUT.i16_ControlWord := 0;
+            #i16_Step := 220;
+        END_IF;
+    220:
+        IF NOT #Out_b_DataTransferOK THEN
+            #Out_b_DataTransferRequired := FALSE;
+            #i16_Step := 0;
+        END_IF;
+        
+    (* Fahrbefehl auf BasePosition / Drive command to BasePosition *)
+    500:
+        IF #Out_st_GripperData_OUT.i8_DeviceMode <> #Inp_i8_DeviceMode THEN
+            #Out_st_GripperData_OUT.i8_DeviceMode := #Inp_i8_DeviceMode;
+            #Out_st_GripperData_OUT.i16_ControlWord := 1;
+            #i16_Step := 510;
+        ELSE
+            #i16_Step := 530;
+        END_IF;
+    510:
+        IF #Out_b_DataTransferOK THEN
+            #Out_st_GripperData_OUT.i16_ControlWord := 0;
+            #i16_Step := 520;
+        END_IF;
+    520:
+        IF NOT #Out_b_DataTransferOK THEN
+            #i16_Step := 530;
+        END_IF;
+    530:
+        #Out_st_GripperData_OUT.i16_ControlWord := 256;     // Move to Base
+        #b_Gripper_InMotion := TRUE;
+        #i16_Step := 560;
+    560:
+        // Außengreifen - Warten auf BasePosition oder Fehler
+        IF #Out_b_BasePosition OR #Out_b_MotionError THEN
+            #i16_Step := 0;
+        END_IF;
+        
+    (* Fahrbefehl auf WorkPosition / Drive command to WorkPosition *)
+    600:
+        IF #Out_st_GripperData_OUT.i8_DeviceMode <> #Inp_i8_DeviceMode THEN
+            #Out_st_GripperData_OUT.i8_DeviceMode := #Inp_i8_DeviceMode;
+            #Out_st_GripperData_OUT.i16_ControlWord := 1;
+            #i16_Step := 610;
+        ELSE
+            #i16_Step := 630;
+        END_IF;
+    610:
+        IF #Out_b_DataTransferOK THEN
+            #Out_st_GripperData_OUT.i16_ControlWord := 0;
+            #i16_Step := 620;
+        END_IF;
+    620:
+        IF NOT #Out_b_DataTransferOK THEN
+            #i16_Step := 630;
+        END_IF;
+    630:
+        #Out_st_GripperData_OUT.i16_ControlWord := 512;     // Move to Work
+        #b_Gripper_InMotion := TRUE;
+        #i16_Step := 660;
+    660:
+        // Außengreifen - Warten auf WorkPosition oder Fehler
+        IF #Out_b_WorkPosition OR #Out_b_MotionError THEN
+            #i16_Step := 0;
+        END_IF;
+        
+    (* Fehler / Error *)
+    990:
+        #b_Gripper_InMotion := FALSE;
+        #Out_st_GripperData_OUT.i16_ControlWord := 0;
+        // Warten auf StepReset...
+        
+END_CASE;
+
+(*_______________________________________________________________________________________________________________________
+Schrittkette für MotorOFF / Step sequence for motor off*)
+
+CASE #i16_StepMotorOFF OF
+    1:
+        #i16_Step := 0;
+        #i16_StepMotorOFF := 0;               
+    5:
+        #Out_st_GripperData_OUT.i8_DeviceMode := 5;         // Motor OFF
+        #Out_st_GripperData_OUT.i16_ControlWord := 1;
+        #b_Gripper_InMotion := FALSE;
+        #i16_StepMotorOFF := 10;
+    10:
+        IF #Out_b_DataTransferOK THEN
+            #Out_st_GripperData_OUT.i16_ControlWord := 0;
+            #i16_StepMotorOFF := 20;
+        END_IF;
+    20:
+        IF NOT #Out_b_DataTransferOK THEN    
+            #i16_StepMotorOFF := 1;
+        END_IF;
+END_CASE;
+
+(*_______________________________________________________________________________________________________________________
+Baustein bei "Reset" blockieren (schrittunabhängig) / Block function block at "Reset" (step independently)*)
+
+IF #Inp_cmd_b_StepReset THEN
+    #Out_b_StepBusy := TRUE;
+    #Out_b_StepDone := FALSE;
+    #i16_StepMotorOFF := 0;
+    IF #Out_i16_Diagnose = 16#400 THEN
+        #Out_st_GripperData_OUT.i16_ControlWord := 32768;   // Error Reset
+        #i16_Step := 5;
+    ELSE
+        #i16_Step := 0;
+    END_IF;
+END_IF;
+
+(*_______________________________________________________________________________________________________________________
+Speicherung der OUTPUT Variablen zum Greifer / Saving the OUTPUT variables to the gripper*)
+
+#i8_DeviceMode_old := #Inp_i8_DeviceMode;
+#i8_GripForce_old := #Inp_i8_GripForce;
+#i8_DriveVelocity_old := #Inp_i8_DriveVelocity;
+#i16_BasePosition_old := #Inp_i16_BasePosition;
+#i16_WorkPosition_old := #Inp_i16_WorkPosition;

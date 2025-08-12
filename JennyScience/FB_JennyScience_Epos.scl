@@ -1,0 +1,456 @@
+(*
+version |   Datum   | Autor       | Kommentar
+--------|-----------|-------------|--------------------------------------------------
+v0.1    |02.04.2024 | w011247@WI  | Erste Erstellung
+--------|-----------|-------------|--------------------------------------------------
+v0.2    |25.07.2025 | w011247@WI  | i_UebergebeKommunikationAnWebserver eingefuegt // Wenn TRUE kann man ueber Webserver steuern, ohne dass die PLC eingreift
+--------|-----------|-------------|--------------------------------------------------
+v0.3    |08.08.2025 | w011247@WI  | Bugfix Error89
+--------|-----------|-------------|--------------------------------------------------
+
+--- Kurzbeschreibung ---
+Schnittstellenbaustein für JennyScience Motoren. 
+
+--- Abhaengig von ---
+Der Inbetriebnahme Webserver JennyScience Regler.
+
+
+--- Alarmbeschreibung ---
+Siehe JennyScience Handbuch.
+error_state:
+1: Antrieb nicht referenziert
+2: keine Reglerfreigabe
+3: Fahrmodus nicht aktiv
+4: Fahrauftrag abgebrochen
+5: Fahrauftrag wegen Warnung beendet
+6: Antrieb startet Referenzfahrt nicht
+7: Timeout Referenzieren
+8: Fahrauftrag wegen Störung beendet
+
+********************************************************************************)
+
+
+REGION Power ON Drive
+    
+    IF #i_NotHalt_IO
+        AND #i_Sicherheitskreis_IO
+    THEN
+        CASE #power_on_state OF
+            0://S0 Einschaltsperre
+                #JS_HMI.Ausgang.Status := 'Führung gefordert';
+                IF #i_Telegramm9DrvToPlc.ZSW1.Fuehrung_gefordert
+                    AND #hmPower_on = 0
+                THEN
+                    #q_Telegramm9PlcToDrv.STW1.Fuehr := TRUE;
+                    #q_Telegramm9PlcToDrv.STW1.Aus2 := TRUE;
+                    #q_Telegramm9PlcToDrv.STW1.Aus3 := TRUE;
+                    #power_on_state := 1;
+                END_IF;
+                
+            1:  //S1 Einschaltsperre
+                #JS_HMI.Ausgang.Status := 'Einschaltsperre';
+                #wthDog(IN := TRUE,
+                        PT := T#500ms);
+                IF #i_Telegramm9DrvToPlc.ZSW1.Einschaltbereit = 1 THEN
+                    #q_Telegramm9PlcToDrv.STW1.Aus1 := TRUE;
+                    #wthDog(IN := FALSE,
+                            PT := T#500ms);
+                    #power_on_state := 2;
+                ELSIF #wthDog.Q THEN
+                    #wthDog(IN := FALSE,
+                            PT := T#500ms);
+                    #power_on_state := -1;
+                END_IF;
+                
+            2:  //S2 Einschaltbereit
+                #JS_HMI.Ausgang.Status := 'Antrieb Einschaltbereit';
+                #wthDog(IN := TRUE,
+                        PT := T#500ms);
+                IF #i_Telegramm9DrvToPlc.ZSW1.Betriebsbereit_KeineStoerung
+                THEN
+                    #q_Telegramm9PlcToDrv.STW1.Freiwechsel := TRUE;
+                    #power_on_state := 3;
+                ELSIF #wthDog.Q THEN
+                    #wthDog(IN := FALSE,
+                            PT := T#500ms);
+                    #power_on_state := -1;
+                END_IF;
+            3: //S3 Betriebsbereit
+               
+                #wthDog(IN := TRUE,
+                        PT := T#500ms);
+                IF #i_Telegramm9DrvToPlc.ZSW1.Status_Reglerfreigabe//Antrieb ist jetzt S4: Betriebsbereit zum Positionieren
+                THEN
+                    #JS_HMI.Ausgang.Status := 'Antrieb Betriebsbereit';
+                    #wthDog(IN := FALSE,
+                            PT := T#500ms);
+                    #hmPower_on := TRUE;
+                    #power_on_state := 100;
+                ELSIF #wthDog.Q THEN
+                    #wthDog(IN := FALSE,
+                            PT := T#500ms);
+                    #power_on_state := -1;
+                END_IF;
+            100:
+                IF #i_Telegramm9DrvToPlc.ZSW1.Stoerung_wirksam THEN
+                    #power_on_state := -2;
+                END_IF;
+                IF #i_Telegramm9DrvToPlc.ZSW1.Einschaltsperre THEN
+                    #power_on_state := -3;
+                END_IF;
+                
+            -1: // Störung beim Einschalten
+                #JS_HMI.Ausgang.Status := 'Störung beim Einschalten';
+                #hmPower_on := FALSE;
+                IF #i_Telegramm9DrvToPlc.ZSW1.Stoerung_wirksam = FALSE THEN
+                    #q_Telegramm9PlcToDrv.STW1.Aus1 := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Aus2 := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Aus3 := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Freiwechsel := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Referenzieren_start := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Fahr_akt := FALSE;
+                    #power_on_state := 0;
+                END_IF;
+            -2:
+                #JS_HMI.Ausgang.Status := 'Störung Antrieb';
+                #hmPower_on := FALSE;
+                IF #i_Telegramm9DrvToPlc.ZSW1.Stoerung_wirksam = FALSE THEN
+                    #q_Telegramm9PlcToDrv.STW1.Aus1 := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Aus2 := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Aus3 := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Freiwechsel := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Referenzieren_start := FALSE;
+                    #q_Telegramm9PlcToDrv.STW1.Fahr_akt := FALSE;
+                    #power_on_state := 0;
+                END_IF;
+            -3:
+                #JS_HMI.Ausgang.Status := 'Störung Einschaltsperre';
+                #hmPower_on := FALSE;
+                #q_Telegramm9PlcToDrv.STW1.Aus1 := FALSE;
+                #q_Telegramm9PlcToDrv.STW1.Aus2 := FALSE;
+                #q_Telegramm9PlcToDrv.STW1.Aus3 := FALSE;
+                #q_Telegramm9PlcToDrv.STW1.Freiwechsel := FALSE;
+                #q_Telegramm9PlcToDrv.STW1.Referenzieren_start := FALSE;
+                #q_Telegramm9PlcToDrv.STW1.Fahr_akt := FALSE;
+                IF #i_Telegramm9DrvToPlc.ZSW1.Stoerung_wirksam = FALSE
+                    AND #i_StoerungQuittieren THEN
+                    #power_on_state := 0;
+                END_IF;
+        END_CASE;
+    ELSE
+        #q_Telegramm9PlcToDrv.STW1.Aus1 := FALSE;
+        #q_Telegramm9PlcToDrv.STW1.Aus2 := FALSE;
+        #q_Telegramm9PlcToDrv.STW1.Aus3 := FALSE;
+        #q_Telegramm9PlcToDrv.STW1.Freiwechsel := FALSE;
+        #q_Telegramm9PlcToDrv.STW1.Referenzieren_start := FALSE;
+        #q_Telegramm9PlcToDrv.STW1.Fahr_akt := FALSE;
+        #hmPower_on := FALSE;
+        #power_on_state := 0;
+        #epos_state := 0;
+    END_IF;
+END_REGION
+
+REGION Sicherheitskreis NIO
+    IF #i_Sicherheitskreis_IO = FALSE THEN
+        #JS_HMI.Eingang.Execute := FALSE;
+        #JS_HMI.Eingang.Referenzieren := FALSE;
+        #JS_HMI.Eingang.Halt := FALSE;
+        #JS_HMI.Ausgang.Status := 'Sicherheitskreis NIO';
+    END_IF;
+END_REGION
+
+REGION Referenzieren
+    IF #hmPower_on
+        AND #JS_HMI.Eingang.Referenzieren
+        AND NOT #JS_HMI.Eingang.Execute
+    THEN
+        CASE #reference_state OF
+            0:  //Referenzieren Idle
+                #q_Telegramm9PlcToDrv.STW1.Referenzieren_start := FALSE;
+                #reference_state := 1;
+            1: //Reglerfreigabe
+                IF #i_Telegramm9DrvToPlc.ZSW1.Status_Reglerfreigabe THEN
+                    #reference_state := 2;
+                ELSE
+                    #reference_state := -1;
+                    #JS_HMI.Ausgang.Status := 'Fehler keine Reglerfreigabe';
+                    #error_state := 2; //keine Reglerfreigabe
+                END_IF;
+            2:
+                IF #i_Telegramm9DrvToPlc.ZSW1.Referenzpunkt_gesetzt THEN
+                    #reference_state := 6;
+                ELSE
+                    #reference_state := 3;
+                END_IF;
+            3:  //Referenzieren start
+                #q_Telegramm9PlcToDrv.STW1.Referenzieren_start := TRUE;
+                #reference_state := 4;
+            4:
+                #wthDog(IN := TRUE,
+                        PT := T#5000ms);
+                IF NOT #i_Telegramm9DrvToPlc.ZSW1.Antrieb_steht THEN    // Antrieb referenziert
+                    #reference_state := 5;
+                    #wthDog(IN := FALSE,
+                            PT := T#5000ms);
+                ELSIF #wthDog.Q THEN
+                    #reference_state := -1;
+                    #JS_HMI.Ausgang.Status := 'Antrieb startet Referenzfahrt nicht';
+                    #error_state := 6; //Antrieb startet Referenzfahrt nicht
+                END_IF;
+                
+            5:
+                #wthDog(IN := TRUE,
+                        PT := T#20000ms);
+                IF #i_Telegramm9DrvToPlc.ZSW1.Antrieb_steht
+                    AND #i_Telegramm9DrvToPlc.ZSW1.Referenzpunkt_gesetzt
+                    AND #i_Telegramm9DrvToPlc.ZSW1.Sollposition_erreicht THEN
+                    #q_Telegramm9PlcToDrv.STW1.Referenzieren_start := FALSE;
+                    #wthDog(IN := FALSE,
+                            PT := T#20000ms);
+                    #reference_state := 6;
+                ELSIF #wthDog.Q THEN
+                    #wthDog(IN := FALSE,
+                            PT := T#20000ms);
+                    #reference_state := -1; // error state
+                    #JS_HMI.Ausgang.Status := 'Timeout Referenzieren';
+                    #error_state := 7; //Timeout Referenzieren
+                END_IF;
+            6:  //Referenzieren fertig
+                #reference_state := 0; 
+                #JS_HMI.Ausgang.Status := 'Referenzieren Abgeschlossen';
+                #JS_HMI.Eingang.Referenzieren := FALSE;
+            ELSE  // Statement section ELSE
+                ;
+        END_CASE;
+        
+        ;
+    END_IF;
+    
+    IF NOT #i_Telegramm9DrvToPlc.ZSW1.Status_Reglerfreigabe AND #reference_state >= 2 THEN
+        #reference_state := -1; // error state
+        #JS_HMI.Ausgang.Status := 'keine Reglerfreigabe';
+        #error_state := 2; //keine Reglerfreigabe   
+    END_IF;
+    
+    
+IF #reference_state < 0 THEN //Error state
+    #q_Telegramm9PlcToDrv.STW1.Referenzieren_start := FALSE;
+    #reference_state := 0;
+END_IF;
+END_REGION
+
+REGION Einfachpositionieren
+    IF #hmPower_on
+        AND #JS_HMI.Eingang.Execute
+        AND #error_state = 0
+        AND NOT #JS_HMI.Eingang.Referenzieren
+        AND #i_FreigabeBewegung
+    THEN
+        CASE #epos_state OF
+            0:
+                #JS_HMI.Ausgang.Status          := 'Idle';
+                #JS_HMI.Ausgang.InPos           := FALSE;
+                #JS_HMI.Ausgang.ForceReached    := FALSE;
+                #q_Telegramm9PlcToDrv.SATZ_ANW.MDI_aktiv    := TRUE; // MDI Mode active
+                #q_Telegramm9PlcToDrv.MDI_MOD.MDIMode       := TRUE; // 0; relative Position mode selected, 1: aboslute Position mode selected      
+                #q_Telegramm9PlcToDrv.STW1.Fahrverwerf      := TRUE; // Do Not Reject Traversing Task
+                #q_Telegramm9PlcToDrv.STW1.Zwihalt          := TRUE; // No Intermediate Stop
+                #q_Telegramm9PlcToDrv.STW1.Fahr_akt         := FALSE;// Reset absolut positioning start
+                #epos_state := 1;
+                
+            1:  // Sollwerte laden
+                #JS_HMI.Ausgang.Status := 'Sollwerte laden';
+                #q_Telegramm9PlcToDrv.MDIPos := #JS_HMI.Eingang.TargetPos;
+                #q_Telegramm9PlcToDrv.MDIVel := #JS_HMI.Eingang.Velocity * 1000;
+                #q_Telegramm9PlcToDrv.MDIAcc := #JS_HMI.Eingang.Acceleration * 1000; //0x4000 => 100% nominal acceleration set by parameter 2007
+                IF #i_ForcePara = 0 THEN
+                    #q_SuppDataPlcToDrv.Limit_I_Force := DINT_TO_INT(#JS_HMI.Eingang.LimitForce); // *10mA intern Strombegrenzung
+                END_IF;
+                IF #i_ForcePara = 1 THEN
+                    #q_SuppDataPlcToDrv.Limit_Force := #JS_HMI.Eingang.LimitForce; //mN für externern Kraftsensor
+                END_IF;
+                
+                IF #i_Telegramm9DrvToPlc.AKT_SATZ.MDI_aktiv THEN
+                    IF #i_Telegramm9DrvToPlc.ZSW1.Status_Reglerfreigabe THEN
+                        IF #i_Telegramm9DrvToPlc.ZSW1.Referenzpunkt_gesetzt THEN
+                            #q_Telegramm9PlcToDrv.STW1.Fahr_akt := FALSE;
+                            #epos_state := 2;
+                        ELSE
+                            #JS_HMI.Ausgang.Status := 'Fehler Antrieb nicht referenziert';
+                            #error_state := 1; //nicht referenziert
+                            #epos_state := -1;
+                        END_IF;
+                    ELSE
+                        #JS_HMI.Ausgang.Status := 'Fehler keine Reglerfreigabe';
+                        #error_state := 2; //keine Reglerfreigabe
+                        #epos_state := -1;
+                    END_IF;
+                ELSE
+                    #JS_HMI.Ausgang.Status := 'Fehler Fahrmodus nicht aktiv';
+                    #error_state := 3;//Fahrmodus nicht aktiv
+                    #epos_state := -1;
+                END_IF;
+                
+            2: //Sollposition erreicht, Achse steht still
+                #JS_HMI.Ausgang.Status := 'Sollposition erreicht, Achse steht still';
+                IF #i_Telegramm9DrvToPlc.ZSW1.Sollposition_erreicht
+                    AND #i_Telegramm9DrvToPlc.ZSW1.Antrieb_steht
+                    AND NOT #i_Telegramm9DrvToPlc.ZSW1.Sollwert_Quittierung THEN
+                    #q_Telegramm9PlcToDrv.STW1.Fahr_akt := TRUE; //start absolut Positionierung
+                    #epos_state := 3;
+                END_IF;
+            3:
+                #JS_HMI.Ausgang.Status := 'Positionieren start';
+                IF #i_Telegramm9DrvToPlc.ZSW1.Sollwert_Quittierung THEN
+                    #q_Telegramm9PlcToDrv.STW1.Fahr_akt := FALSE;
+                    #epos_state := 4;
+                ELSIF NOT #q_Telegramm9PlcToDrv.STW1.Fahr_akt
+                    OR NOT #q_Telegramm9PlcToDrv.STW1.Fahrverwerf
+                    OR NOT #q_Telegramm9PlcToDrv.STW1.Zwihalt THEN
+                    #error_state := 4; //Fahrauftrag abgebrochen
+                    #epos_state := -1;
+                END_IF;
+            4:  //Positionieren fertig
+                #JS_HMI.Ausgang.Status := 'Antrieb positioniert';
+                IF #i_Telegramm9DrvToPlc.ZSW1.Sollposition_erreicht
+                    AND #i_Telegramm9DrvToPlc.ZSW1.Antrieb_steht THEN
+                    IF #i_Telegramm9DrvToPlc.ZSW1.Warnung_wirksam THEN
+                        #JS_HMI.Ausgang.Status := 'Fahrauftrag wegen Warnung beendet';
+                        #error_state := 5; //Fahrauftrag wegen Warnung beendet
+                        #epos_state := -1;
+                    ELSE
+                        #JS_HMI.Eingang.Execute := FALSE;
+                        #JS_HMI.Ausgang.InPos := TRUE;
+                        #JS_HMI.Ausgang.Status := 'Idle';
+                        #epos_state := 0;
+                    END_IF;
+                ELSIF #i_SuppDataDrvToPlc.ProcessStatusRegister.I_Force_Max_Limit_Reached
+                    OR #i_SuppDataDrvToPlc.ProcessStatusRegister.ForceMaxLimitReached THEN
+                    
+                    #JS_HMI.Eingang.Execute := FALSE;
+                    #JS_HMI.Ausgang.ForceReached := TRUE;
+                    #JS_HMI.Ausgang.Status := 'Kraft erreicht';
+                    #epos_state := 0;
+                    #q_Telegramm9PlcToDrv.STW1.Fahrverwerf := FALSE;// Reset absolut positioning
+                END_IF;
+                IF #i_Telegramm9DrvToPlc.ZSW1.Stoerung_wirksam THEN
+                    #JS_HMI.Ausgang.Status := 'Fahrauftrag wegen Störung beendet';
+                    #error_state := 8; //Fahrauftrag wegen Störung beendet
+                    #epos_state := -1;
+                END_IF;
+            ELSE  // Statement section ELSE
+                
+                ;
+        END_CASE;
+        
+    IF NOT #i_Telegramm9DrvToPlc.ZSW1.Status_Reglerfreigabe THEN
+        #JS_HMI.Eingang.Execute := FALSE;
+        #epos_state := 0;
+    END_IF;
+    
+    IF #epos_state < 0 THEN // Errorstate
+        #epos_state             := 0;
+        #JS_HMI.Eingang.Execute := FALSE;
+    END_IF;
+    
+        ;
+    END_IF;
+    
+    
+END_REGION
+
+REGION Antrieb Halt
+    
+    IF #JS_HMI.Eingang.Halt THEN
+        #JS_HMI.Eingang.Execute := FALSE;
+        #JS_HMI.Eingang.Referenzieren := FALSE;
+        CASE #halt_state OF
+            0:
+                #JS_HMI.Ausgang.Status := 'Halte Antrieb an';
+                #q_Telegramm9PlcToDrv.MDIDec := #JS_HMI.Eingang.Acceleration;
+                #q_Telegramm9PlcToDrv.STW1.Fahrverwerf := FALSE;
+                #q_Telegramm9PlcToDrv.STW1.Fahr_akt := FALSE;
+                #halt_state := 1;
+                #epos_state := 0;
+                #error_state := 0;
+            1:
+                IF #i_Telegramm9DrvToPlc.ZSW1.Antrieb_steht
+                    AND #i_Telegramm9DrvToPlc.ZSW1.Sollposition_erreicht THEN
+                    #JS_HMI.Ausgang.Status := 'Antrieb steht';
+                    #JS_HMI.Eingang.Halt := FALSE;
+                    #halt_state := 0;
+                END_IF;
+        END_CASE;
+    END_IF;
+    
+END_REGION
+
+REGION Eingänge
+    IF #i_StoerungQuittieren THEN
+        #error_state := 0;
+        #iq_Stoermeldeindikator := FALSE;
+    END_IF;
+  
+    IF #i_StoerungQuittieren AND NOT #JS_HMI.Eingang.Execute AND #epos_state <> 0 THEN
+        #epos_state := 0;
+    END_IF;
+    
+END_REGION
+
+REGION Ausgänge
+    //Antrieb steht
+    #q_AntriebeStehen := #i_Telegramm9DrvToPlc.ZSW1.Antrieb_steht;
+    #q_Telegramm9PlcToDrv.STW1.Stoer_ruecks := #i_StoerungQuittieren;
+
+END_REGION
+
+REGION HMI Interface
+    IF #i_ForcePara = 0 THEN
+        #JS_HMI.Ausgang.IForceActual := #i_SuppDataDrvToPlc.I_Force_Actual;
+    END_IF;
+    IF #i_ForcePara = 1 THEN
+        #JS_HMI.Ausgang.IForceActual := #i_SuppDataDrvToPlc.Force_Actual;
+    END_IF;
+    #JS_HMI.Ausgang.PositionActual := #i_Telegramm9DrvToPlc.IstPosition;
+    #JS_HMI.Ausgang.Referenziert := #i_Telegramm9DrvToPlc.ZSW1.Referenzpunkt_gesetzt;
+    #JS_HMI.Ausgang.KraftWertErreicht := #i_SuppDataDrvToPlc.ProcessStatusRegister.Force_in_Sector;
+    #JS_HMI.Ausgang.ErrorState := #error_state;
+    #JS_HMI.Ausgang.Error := #i_Telegramm9DrvToPlc.ZSW1.Stoerung_wirksam;
+    #JS_HMI.Ausgang.Warning := #i_Telegramm9DrvToPlc.ZSW1.Warnung_wirksam;
+    #JS_HMI.Ausgang.FreigabeBedienungHMI := #i_FreigabeHMI;
+    #JS_HMI.Ausgang.FreigabeBewegung := #i_FreigabeBewegung;
+    #JS_HMI.Ausgang.Betriebsbereit_KeineStoerung := #i_Telegramm9DrvToPlc.ZSW1.Betriebsbereit_KeineStoerung;
+END_REGION
+
+REGION Kommunikation an Webserver uebergeben bei IBN
+    #NegFlagUebergebeKomm(CLK:=#i_UebergebeKommunikationAnWebserver);
+    // tpo=0 // Webserver hat Hoheit, resi // Neustart Achse
+    IF #i_UebergebeKommunikationAnWebserver THEN
+        #q_Telegramm9PlcToDrv.STW1.Aus2 := FALSE;
+    ELSIF #NegFlagUebergebeKomm.Q THEN
+        #power_on_state := 0;
+    END_IF;
+END_REGION
+
+REGION Fehlerhandling JennyScience Drive
+    #iDB_BasisMappingProgramAlarm
+    (i_Signal := #i_Telegramm9DrvToPlc.ZSW1.Stoerung_wirksam OR #error_state <> 0,
+     i_Maschine := #ip_Maschine,
+     i_Station := #ip_Station,
+     i_Bmk := #ip_Bmk,
+     i_FehlernummerObjekt:=#error_state,
+     i_IstWarnung := FALSE,
+     iq_Meldung := #Meldungen_JennyScience);
+    
+    // Ausgabe
+    IF #iDB_BasisMappingProgramAlarm.q_Stoerung THEN
+        #iq_Stoermeldeindikator         := #iDB_BasisMappingProgramAlarm.q_Stoerung OR #iq_Stoermeldeindikator;
+        #JS_HMI.Eingang.Execute         := FALSE;
+        #JS_HMI.Eingang.Referenzieren   := FALSE;
+        #JS_HMI.Eingang.Halt            := FALSE;
+        #JS_HMI.Ausgang.InPos           := FALSE;
+        #JS_HMI.Ausgang.ForceReached    := FALSE;
+    END_IF;
+    
+    
+END_REGION

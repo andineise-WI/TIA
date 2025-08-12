@@ -1,0 +1,13 @@
+﻿TYPE "ST_JSSuppDataPlcToDrv"
+VERSION : 0.1
+   STRUCT
+      Limit_I_Force : Int;
+      Limit_Force : DInt;
+      Scurve : DInt := 20;
+      FollowingPosErrWindow : DInt := 2000;
+      TargetPositionWindow : DInt := 50;
+      DigitalOutput : DInt;
+   END_STRUCT;
+
+END_TYPE
+

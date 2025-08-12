@@ -1,0 +1,47 @@
+﻿TYPE "ST_JSSuppDataDrvToPlc"
+VERSION : 0.1
+   STRUCT
+      MotorCurrent : Int;
+      I_Force_Actual : DInt;
+      Force_Actual : DInt;
+      ProcessStatusRegister : Struct
+         Information : Bool;
+         Phasing_Done : Bool;
+         IForceDriftCompensationDriveActive : Bool;
+         ForceMaxLimitReached : Bool;
+         unused_3 : Bool;
+         unused_4 : Bool;
+         unused_5 : Bool;
+         unused_6 : Bool;
+         STO_Primed_Hit : Bool;
+         SS1_Primed_Hit : Bool;
+         SS2_Primed : Bool;
+         SS2_Hit : Bool;
+         SLS_Primed : Bool;
+         SLS_Speed_Hit : Bool;
+         SLS_Position_Hit : Bool;
+         Warning : Bool;
+         Inverter_voltage_present : Bool;
+         End_of_Gantry_Init : Bool;
+         Hardware_Limit_Switch_Left : Bool;
+         Hardware_Limit_Switch_Right : Bool;
+         Emergency_Exit_1 : Bool;
+         Emergency_Exit : Bool;
+         Force_Calibration_Processs_Running : Bool;
+         I_Force_Max_Limit_Reached : Bool;
+         Error : Bool;
+         Reference : Bool;
+         In_Motion : Bool;
+         In_Position : Bool;
+         End_of_Program : Bool;
+         In_Force : Bool;
+         In_Sector : Bool;
+         Force_in_Sector : Bool;
+      END_STRUCT;
+      ActualPositionFollowingError : DInt;
+      DigitalInput : DInt;
+      DigitalOutput : DInt;
+   END_STRUCT;
+
+END_TYPE
+

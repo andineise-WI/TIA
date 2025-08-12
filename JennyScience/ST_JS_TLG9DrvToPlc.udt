@@ -1,0 +1,48 @@
+﻿TYPE "ST_JS_TLG9DrvToPlc"
+VERSION : 0.1
+   STRUCT
+      ZSW1 : Struct
+         Kein_Schleppfehler : Bool;
+         Fuehrung_gefordert : Bool;
+         Sollposition_erreicht : Bool;
+         Referenzpunkt_gesetzt : Bool;
+         Sollwert_Quittierung : Bool;
+         Antrieb_steht : Bool;
+         res_14 : Bool;
+         res_15 : Bool;
+         Einschaltbereit : Bool;
+         Betriebsbereit_KeineStoerung : Bool;
+         Status_Reglerfreigabe : Bool;
+         Stoerung_wirksam : Bool;
+         Kein_AUS_2_steht_an : Bool;
+         Kein_AUS_3_steht_an : Bool;
+         Einschaltsperre : Bool;
+         Warnung_wirksam : Bool;
+      END_STRUCT;
+      AKT_SATZ : Struct
+         res_8 : Bool;
+         res_9 : Bool;
+         res_10 : Bool;
+         res_11 : Bool;
+         res_12 : Bool;
+         res_13 : Bool;
+         res_14 : Bool;
+         MDI_aktiv : Bool;
+         Satz : Byte;
+      END_STRUCT;
+      ZSW2 : Struct
+         res_8 : Bool;
+         res_9 : Bool;
+         pulses_enabled : Bool;
+         res_11 : Bool;
+         res_12 : Bool;
+         res_13 : Bool;
+         res_14 : Bool;
+         res_15 : Bool;
+         res_0_7 : Byte;
+      END_STRUCT;
+      IstPosition : DInt;
+   END_STRUCT;
+
+END_TYPE
+

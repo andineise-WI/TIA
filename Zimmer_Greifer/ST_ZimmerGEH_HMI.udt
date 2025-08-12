@@ -1,0 +1,39 @@
+TYPE "ST_ZimmerGEH_HMI"
+VERSION : 0.1
+   STRUCT
+      Eingang : Struct
+         MotorON : Bool;   // Motor einschalten
+         MotorOFF : Bool;   // Motor ausschalten
+         StartHoming : Bool;   // Referenzfahrt starten
+         MoveToBase : Bool;   // Fahren zur BasePosition
+         MoveToWork : Bool;   // Fahren zur WorkPosition
+         DataTransfer : Bool;   // Datenübertragung starten
+         StepReset : Bool;   // Schrittkette zurücksetzen / Fehler quittieren
+         DeviceMode { S7_SetPoint := 'True'} : Int := 63;   // DeviceMode für Greifer (63=Außengreifen)
+         GripForce { S7_SetPoint := 'True'} : Int := 50;   // Greifkraft 1-100%
+         DriveVelocity { S7_SetPoint := 'True'} : Int := 50;   // Geschwindigkeit 1-100%
+         BasePosition { S7_SetPoint := 'True'} : Int := 750;   // BasePosition in 0,01mm
+         WorkPosition { S7_SetPoint := 'True'} : Int := 1200;   // WorkPosition in 0,01mm
+         MotionTimeout { S7_SetPoint := 'True'} : Time := T#10s;   // Timeout für Bewegungen
+      END_STRUCT;
+      Ausgang : Struct
+         StepBusy : Bool;   // Baustein ist beschäftigt
+         StepDone : Bool;   // Baustein ist bereit für neuen Befehl
+         DataTransferRequired : Bool;   // Datenübertragung erforderlich
+         DataTransferError : Bool;   // Fehler bei Datenübertragung
+         MotionError : Bool;   // Fehler bei Bewegung (Timeout)
+         HomingPositionOK : Bool;   // Referenzposition ist OK
+         MotorON : Bool;   // Motor ist eingeschaltet
+         InMotion : Bool;   // Greifer ist in Bewegung
+         MovementComplete : Bool;   // Bewegung abgeschlossen
+         BasePosition : Bool;   // Greifer ist in BasePosition
+         WorkPosition : Bool;   // Greifer ist in WorkPosition
+         Error : Bool;   // Allgemeiner Fehler
+         Diagnosis : Int;   // Diagnose-Code
+         ActualPosition : Int;   // Aktuelle Position in 0,01mm
+         Status : String;   // Status-Text
+         ErrorState : Int;   // Interner Fehlerstatus
+      END_STRUCT;
+   END_STRUCT;
+
+END_TYPE
