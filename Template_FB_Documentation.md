@@ -619,19 +619,229 @@ END_REGION
 
 ---
 
+## UDT-Erstellungsanleitung
+
+### Die 3 Standard-UDTs erstellen
+
+#### UDT 1: ST_[Gerät]_DrvToPlc
+```scl
+TYPE "ST_[Gerät]_DrvToPlc"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   STRUCT
+      StatusWord : Struct
+         Ready { S7_SetPoint := 'False'} : Bool := false;                    // Bit 0: Gerät betriebsbereit
+         Error { S7_SetPoint := 'False'} : Bool := false;                    // Bit 1: Störung aktiv  
+         Warning { S7_SetPoint := 'False'} : Bool := false;                  // Bit 2: Warnung aktiv
+         InMotion { S7_SetPoint := 'False'} : Bool := false;                 // Bit 3: Bewegung aktiv
+         PositionReached { S7_SetPoint := 'False'} : Bool := false;          // Bit 4: Zielposition erreicht
+         Referenced { S7_SetPoint := 'False'} : Bool := false;               // Bit 5: Referenzierung abgeschlossen
+         HomePosition { S7_SetPoint := 'False'} : Bool := false;             // Bit 6: Home-Position
+         LimitSwitchPos { S7_SetPoint := 'False'} : Bool := false;           // Bit 7: Endschalter positiv
+         LimitSwitchNeg { S7_SetPoint := 'False'} : Bool := false;           // Bit 8: Endschalter negativ
+         // Reserve Bits 9-15 für gerätespezifische Status
+      END_STRUCT;
+      ActualPosition { S7_SetPoint := 'False'} : DInt := 0;                  // Ist-Position in [Einheit]
+      ActualVelocity { S7_SetPoint := 'False'} : DInt := 0;                  // Ist-Geschwindigkeit in [Einheit]/s
+      ActualForce { S7_SetPoint := 'False'} : DInt := 0;                     // Ist-Kraft in [Einheit]
+      DiagnosisCode { S7_SetPoint := 'False'} : Word := 16#0000;             // Diagnose-Code (Herstellerspezifisch)
+      DeviceID { S7_SetPoint := 'False'} : Word := 16#0000;                  // Geräte-Identifikation
+      FirmwareVersion { S7_SetPoint := 'False'} : Word := 16#0000;           // Firmware-Version
+      // [Weitere gerätespezifische Ist-Werte hier hinzufügen]
+   END_STRUCT;
+END_TYPE
+```
+
+#### UDT 2: ST_[Gerät]_PlcToDrv
+```scl
+TYPE "ST_[Gerät]_PlcToDrv"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   STRUCT
+      ControlWord : Struct
+         Enable { S7_SetPoint := 'True'} : Bool := false;                    // Bit 0: Freigabe
+         Start { S7_SetPoint := 'True'} : Bool := false;                     // Bit 1: Start-Befehl
+         Stop { S7_SetPoint := 'True'} : Bool := false;                      // Bit 2: Stop-Befehl  
+         Reset { S7_SetPoint := 'True'} : Bool := false;                     // Bit 3: Reset-Befehl
+         Home { S7_SetPoint := 'True'} : Bool := false;                      // Bit 4: Referenzfahrt
+         Acknowledge { S7_SetPoint := 'True'} : Bool := false;               // Bit 5: Quittierung
+         ModeSwitch { S7_SetPoint := 'True'} : Bool := false;                // Bit 6: Modus-Umschaltung
+         // Reserve Bits 7-15 für gerätespezifische Befehle
+      END_STRUCT;
+      TargetPosition { S7_SetPoint := 'True'} : DInt := 0;                   // Soll-Position in [Einheit]
+      TargetVelocity { S7_SetPoint := 'True'} : DInt := 1000;                // Soll-Geschwindigkeit in [Einheit]/s
+      TargetAcceleration { S7_SetPoint := 'True'} : DInt := 1000;            // Soll-Beschleunigung in [Einheit]/s²
+      TargetForce { S7_SetPoint := 'True'} : DInt := 100;                    // Soll-Kraft in [Einheit]
+      OperationMode { S7_SetPoint := 'True'} : Byte := 1;                    // Betriebsmodus (1=Position, 2=Velocity, 3=Force)
+      ParameterSet { S7_SetPoint := 'True'} : Byte := 1;                     // Parametersatz-Nummer
+      // [Weitere gerätespezifische Soll-Werte hier hinzufügen]
+   END_STRUCT;
+END_TYPE
+```
+
+#### UDT 3: ST_[Gerät]_HMI
+```scl
+TYPE "ST_[Gerät]_HMI"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   STRUCT
+      Eingang : Struct   // Befehle VOM Anwenderprogramm ZUM Funktionsblock
+         Execute { S7_SetPoint := 'True'} : Bool := false;                   // Funktion ausführen
+         Home { S7_SetPoint := 'True'} : Bool := false;                      // Referenzfahrt starten
+         Stop { S7_SetPoint := 'True'} : Bool := false;                      // Stopp-Befehl
+         Reset { S7_SetPoint := 'True'} : Bool := false;                     // Reset/Quittierung
+         JogPlus { S7_SetPoint := 'True'} : Bool := false;                   // Jog vorwärts
+         JogMinus { S7_SetPoint := 'True'} : Bool := false;                  // Jog rückwärts
+         TargetPosition { S7_SetPoint := 'True'} : DInt := 0;                // Ziel-Position in [Einheit]
+         Velocity { S7_SetPoint := 'True'} : DInt := 50;                     // Geschwindigkeit in % (1-100)
+         Acceleration { S7_SetPoint := 'True'} : DInt := 25;                 // Beschleunigung in % (1-100)  
+         Force { S7_SetPoint := 'True'} : DInt := 50;                        // Kraftbegrenzung in % (1-100)
+         OperationMode { S7_SetPoint := 'True'} : Int := 1;                  // Betriebsmodus
+         Timeout { S7_SetPoint := 'True'} : Time := T#10s;                   // Timeout für Operationen
+         // [Weitere Eingabeparameter hier hinzufügen]
+      END_STRUCT;
+      Ausgang : Struct   // Status VOM Funktionsblock ZUM Anwenderprogramm
+         Status { S7_SetPoint := 'False'} : String := '';                    // Status-Text (max. 254 Zeichen)
+         StepBusy { S7_SetPoint := 'False'} : Bool := false;                 // FB beschäftigt
+         StepDone { S7_SetPoint := 'False'} : Bool := true;                  // FB bereit für neuen Befehl
+         InPosition { S7_SetPoint := 'False'} : Bool := false;               // Position erreicht
+         Ready { S7_SetPoint := 'False'} : Bool := false;                    // Gerät betriebsbereit
+         Error { S7_SetPoint := 'False'} : Bool := false;                    // Fehler aktiv
+         Warning { S7_SetPoint := 'False'} : Bool := false;                  // Warnung aktiv
+         Referenced { S7_SetPoint := 'False'} : Bool := false;               // Referenziert
+         ErrorCode { S7_SetPoint := 'False'} : Int := 0;                     // Fehlercode (siehe Fehlertabelle)
+         PositionActual { S7_SetPoint := 'False'} : DInt := 0;               // Ist-Position in [Einheit]
+         VelocityActual { S7_SetPoint := 'False'} : DInt := 0;               // Ist-Geschwindigkeit
+         ForceActual { S7_SetPoint := 'False'} : DInt := 0;                  // Ist-Kraft
+         Progress { S7_SetPoint := 'False'} : Int := 0;                      // Fortschritt in % (0-100)
+         // [Weitere Statuswerte hier hinzufügen]
+      END_STRUCT;
+   END_STRUCT;
+END_TYPE
+```
+
+## Herstellerdokumentation als Basis für UDT-Entwicklung
+
+### 📚 **Primäre Informationsquellen**
+
+#### 1. Hersteller-Beispielprogramme
+```
+🔍 Typische Dateien suchen:
+├── Example_[Gerätename].scl
+├── Sample_[Gerätename]_Control.scl  
+├── Demo_[Gerätename].zip
+└── [Gerätename]_Library.zip
+
+📁 Wichtige Inhalte extrahieren:
+- Telegramm-Strukturen (Input/Output)
+- StatusWord/ControlWord Bit-Definitionen
+- Beispiel-Zustandsmaschinen
+- Timing-Parameter und Timeouts
+```
+
+#### 2. PDF-Handbücher analysieren
+```
+📖 Relevante Kapitel identifizieren:
+- "Kommunikation" / "Communication Interface"
+- "Telegramm-Aufbau" / "Telegram Structure"  
+- "Statuswörter" / "Status Words"
+- "Fehlercodes" / "Error Codes"
+- "Programmierbeispiele" / "Programming Examples"
+
+🔍 Spezifische Tabellen suchen:
+- Bit-Zuordnungstabellen (StatusWord/ControlWord)
+- Datentyp-Spezifikationen
+- Wertebereiche und Einheiten
+- Timeout-Empfehlungen
+```
+
+### 🛠️ **Herstellerspezifische UDT-Anpassung**
+
+#### Template-Anpassung basierend auf Herstellerdokumentation:
+
+```scl
+// SCHRITT 1: Hersteller-Telegramm analysieren (aus PDF/Beispielen)
+// Beispiel: Siemens Sinamics Telegramm 111
+TYPE "ST_Sinamics_DrvToPlc"  // ← Herstellername + Geräteserie
+   STRUCT
+      // StatusWord aus Handbuch Kapitel "Telegramm 111"
+      ZSW1 : Struct  // ← Original-Bezeichnung beibehalten
+         Bereit : Bool;                    // Bit 0 - aus Hersteller-Bit-Tabelle
+         Freigabe : Bool;                  // Bit 1 - aus Hersteller-Bit-Tabelle  
+         Referenziert : Bool;              // Bit 11 - aus Hersteller-Bit-Tabelle
+         // [Weitere Bits entsprechend Hersteller-Dokumentation]
+      END_STRUCT;
+      XIST1 : DInt;    // ← Original-Bezeichnung aus Handbuch
+      NIST : DInt;     // ← Original-Bezeichnung aus Handbuch
+      // [Weitere Werte entsprechend Telegramm-Definition]
+   END_STRUCT;
+END_TYPE
+```
+
+#### Beispiel-Workflow: Siemens Sinamics
+```scl
+// 1. Aus Sinamics Handbuch "Telegramm 111" extrahiert:
+StatusWord1.Bit0 = Betriebsbereit
+StatusWord1.Bit1 = Keine Störung  
+StatusWord1.Bit11 = Referenzpunkt gesetzt
+
+// 2. In UDT übertragen:
+TYPE "ST_Sinamics_DrvToPlc"
+   STRUCT
+      ZSW1 : Struct
+         Betriebsbereit : Bool;           // Bit 0 (Hersteller-Bezeichnung)
+         Keine_Stoerung : Bool;           // Bit 1  
+         Referenzpunkt_gesetzt : Bool;    // Bit 11
+      END_STRUCT;
+   END_STRUCT;
+END_TYPE
+```
+
+### 📋 **Dokumentations-Checkliste für UDT-Erstellung**
+
+#### Vor UDT-Erstellung sammeln:
+- [ ] **Hersteller-Beispielprogramm** heruntergeladen und analysiert
+- [ ] **Kommunikationshandbuch** mit Telegramm-Definitionen vorliegen
+- [ ] **Bit-Zuordnungstabellen** für StatusWord/ControlWord extrahiert
+- [ ] **Datentyp-Spezifikationen** (Einheiten, Wertebereiche) dokumentiert
+- [ ] **Fehlercodes-Tabelle** aus Handbuch übernommen
+- [ ] **Timing-Parameter** (Timeouts, Zykluszeiten) ermittelt
+
+#### UDT-Anpassungsschritte:
+1. **Template kopieren** und Gerätename einsetzen
+2. **StatusWord-Bits** entsprechend Hersteller-Dokumentation anpassen
+3. **ControlWord-Bits** entsprechend Hersteller-Dokumentation anpassen  
+4. **Datentypen und Einheiten** aus Handbuch übernehmen
+5. **Original-Bezeichnungen** des Herstellers beibehalten (ZSW1, STW1, etc.)
+6. **Standardwerte** entsprechend Hersteller-Empfehlungen setzen
+
+### UDT-Erstellungsreihenfolge
+1. **Herstellerdokumentation studieren** - Telegramm-Aufbau verstehen
+2. **DrvToPlc erstellen** - Status-Telegramm implementieren
+3. **PlcToDrv erstellen** - Befehl-Telegramm implementieren  
+4. **HMI anpassen** - Anwenderschnittstelle definieren
+
+### Wichtige UDT-Attribute
+- **Hersteller-Bezeichnungen beibehalten**: ZSW1, STW1, XIST1, etc.
+- **Original-Bit-Nummerierung**: Entsprechend Hersteller-Dokumentation
+- **Einheiten aus Handbuch**: mm, °, mN, etc.
+- **Wertebereiche validieren**: Min/Max-Werte aus Spezifikation
+
 ## Schritt-für-Schritt Implementierungsanleitung
 
-### Phase 1: Grundstruktur erstellen
-1. **FB-Deklaration kopieren** und Platzhalter `[Gerätename]` ersetzen
-2. **HMI-Struktur definieren** mit gerätespezifischen Ein-/Ausgängen
-3. **Variablen anpassen**: Zustandsvariablen für jede Hauptfunktion
-4. **Timer hinzufügen** für zeitkritische Vorgänge
+### Phase 1: UDTs und Grundstruktur erstellen
+1. **Drei UDTs erstellen** in der oben gezeigten Reihenfolge
+2. **FB-Deklaration kopieren** und Platzhalter `[Gerätename]` ersetzen
+3. **UDT-Referenzen einbinden** in VAR_INPUT/OUTPUT
+4. **Variablen anpassen**: Zustandsvariablen für jede Hauptfunktion
+5. **Timer hinzufügen** für zeitkritische Vorgänge
 
-### Phase 2: Power-ON implementieren
-1. **Power-ON Region** mit gerätespezifischer Einschaltsequenz
-2. **Watchdog-Timer** für jeden kritischen Schritt
-3. **Fehlerzustände** definieren und behandeln
-4. **Sicherheitskreis-Behandlung** implementieren
+### Phase 2: Herstellerspezifische Implementierung
+1. **Hersteller-Beispielcode analysieren** und State-Machine extrahieren
+2. **Power-ON Sequenz** entsprechend Hersteller-Vorgaben implementieren
+3. **Original-Zeitvorgaben** aus Handbuch übernehmen (nicht schätzen!)
+4. **Hersteller-Fehlercodes** in error_state-Behandlung integrieren
+5. **Sicherheitskonzept** entsprechend Gerätespezifikation umsetzen
 
 ### Phase 3: Hauptfunktionen hinzufügen
 1. **Funktions-Regionen** nach Standard-Pattern
@@ -647,9 +857,18 @@ END_REGION
 
 ## Checkliste für neue Funktionsblöcke
 
+### UDT-Checkliste
+- [ ] ST_[Gerät]_DrvToPlc mit StatusWord und Ist-Werten erstellt
+- [ ] ST_[Gerät]_PlcToDrv mit ControlWord und Soll-Werten erstellt  
+- [ ] ST_[Gerät]_HMI mit Eingang/Ausgang-Strukturen erstellt
+- [ ] S7_SetPoint Attribute korrekt gesetzt (Input=False, Output=True)
+- [ ] Standardwerte für alle Parameter definiert
+- [ ] Kommentare mit Einheiten für alle Elemente vorhanden
+
 ### Struktur-Checkliste
 - [ ] Kommentarblock mit Versionshistorie vorhanden
 - [ ] Alle Standard-Eingänge implementiert (NotHalt, Sicherheitskreis, etc.)
+- [ ] Drei UDTs korrekt referenziert in FB-Deklaration
 - [ ] HMI-Struktur vollständig definiert
 - [ ] Watchdog-Timer für kritische Vorgänge vorhanden
 - [ ] Fehlerhandling mit Program_Alarm implementiert
@@ -860,25 +1079,63 @@ BEGIN
 END_DATA_BLOCK
 ```
 
+## Häufige Hersteller-Patterns
+
+### Siemens Antriebe (Sinamics, etc.)
+```scl
+// Typische Strukturen aus Siemens-Beispielen:
+ZSW1, ZSW2 : Word;        // Zustandswort 1+2 (StatusWord)
+STW1, STW2 : Word;        // Steuerwort 1+2 (ControlWord)  
+XIST1 : DInt;             // Ist-Position
+NSOLL_A : DInt;           // Soll-Drehzahl
+```
+
+### Beckhoff Antriebe (AX5000, etc.)
+```scl
+// Typische Strukturen aus Beckhoff-Beispielen:
+Status : WORD;            // Status Register
+Control : WORD;           // Control Register
+ActPos : DINT;            // Actual Position
+SetPos : DINT;            // Set Position
+```
+
+### SEW Antriebe (Movimot, etc.)
+```scl
+// Typische Strukturen aus SEW-Beispielen:
+StatusRegister : WORD;
+CommandRegister : WORD;
+ActualPosition : DINT;
+TargetPosition : DINT;
+```
+
+### Festo Pneumatik/Servo
+```scl
+// Typische Strukturen aus Festo-Beispielen:
+StatusByte : BYTE;
+ControlByte : BYTE;
+PositionActual : INT;
+PositionSetpoint : INT;
+```
+
 ## Template-Verwendung
 
 Diese erweiterte Vorlage bietet:
 
-### ✅ **Sofort verwendbare Code-Patterns**
-- Vollständige FB-Struktur zum Kopieren
-- Standard-Regionen für typische Anwendungen
-- Bewährte Zustandsmaschinen-Implementierungen
+### ✅ **Herstellerspezifische Anpassung**
+- Systematische Nutzung von Hersteller-Dokumentation
+- Beibehaltung von Original-Bezeichnungen und Bit-Zuordnungen  
+- Validierte Timing-Parameter aus Handbüchern
 
-### ✅ **Detaillierte Implementation Guidelines**
-- Schritt-für-Schritt Anleitung
-- Umfassende Checklisten
-- Gerätespezifische Anpassungsvorschläge
+### ✅ **Bewährte Code-Patterns**
+- Vollständige FB-Struktur basierend auf Hersteller-Beispielen
+- Standard-Regionen angepasst an typische Geräte-Workflows
+- Zustandsmaschinen entsprechend Hersteller-Spezifikationen
 
-### ✅ **Qualitätssicherung**
-- Code-Review-Kriterien
-- Test-Vorgaben
-- Dokumentationsstandards
+### ✅ **Qualitätssicherung durch Dokumentation**
+- Pflichtanalyse der Hersteller-Unterlagen vor Implementierung
+- Checklisten für vollständige Dokumentations-Erfassung
+- Validierung gegen Original-Spezifikationen
 
-**Die Vorlage ist nun vollständig ausreichend für die eigenständige Erstellung neuer Funktionsblöcke ohne zusätzliche Rückfragen.**
+**Die Vorlage berücksichtigt jetzt die wichtige Rolle der Herstellerdokumentation und leitet zur systematischen Nutzung dieser Informationsquellen an.**
 
 *Diese Vorlage basiert auf der bewährten Architektur des FB_JennyScience_Epos und gewährleistet einheitliche Struktur und Wartbarkeit.*
