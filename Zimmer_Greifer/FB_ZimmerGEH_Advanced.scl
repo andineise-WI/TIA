@@ -1,0 +1,509 @@
+FUNCTION_BLOCK "FB_ZimmerGEH_Advanced"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      ip_Maschine : Int := 1;   // Maschinennummer
+      ip_Station : Int;   // Stationsnummer
+      ip_Bmk : String[30];   // Begleitwert als String
+      i_StoerungQuittieren : Bool;   // Störung quittieren
+      i_NotHalt_IO : Bool;   // Steuerung Ein
+      i_Sicherheitskreis_IO : Bool;   // Sicherheitskreis OK / Freigabe Greifer
+      i_FreigabeBewegung : Bool;   // 1=Greifer darf verfahren/keine Kollision
+      i_FreigabeHMI : Bool;   // 1=Freigabe für Bewegung über HMI
+      i_ZimmerGEH_DrvToPlc : "ST_ZimmerGEH6000_DrvToPlc";   // Eingangsdaten vom Greifer
+   END_VAR
+
+   VAR_OUTPUT 
+      q_ZimmerGEH_PlcToDrv : "ST_ZimmerGEH6000_PlcToDrv";   // Ausgangsdaten zum Greifer
+      q_GripperReady : Bool;   // Greifer ist betriebsbereit
+   END_VAR
+
+   VAR_IN_OUT 
+      ZimmerGEH_HMI : "ST_ZimmerGEH_HMI";   // HMI-Interface
+      iq_Stoermeldeindikator { ExternalVisible := 'False'} : Bool;   // Störmelder
+   END_VAR
+
+   VAR 
+      power_on_state : Int;   // Status Motor ein/aus
+      reference_state : Int;   // Status Referenzfahrt  
+      grip_state : Int;   // Status Greifen
+      release_state : Int;   // Status Loslassen
+      error_state : Int;   // Fehlerstatus
+      
+      // Hilfsmerkbits
+      hmPower_on : Bool;   // Motor ist eingeschaltet
+      gripper_in_motion : Bool;   // Greifer in Bewegung
+      hmReferenced : Bool;   // Greifer ist referenziert
+      hmGripped : Bool;   // Werkstück gegriffen
+      
+      // Alte Werte für Änderungserkennung (entsprechend Original)
+      device_mode_old : Int;
+      workpiece_no_old : Int;
+      position_tolerance_old : Int;
+      grip_force_old : Int;
+      drive_velocity_old : Int;
+      base_position_old : Int;
+      work_position_old : Int;
+   END_VAR
+   
+   VAR DB_SPECIFIC
+      // Timer entsprechend Original-Code
+      ton_Timer_DataTransfer {InstructionName := 'TON'; LibVersion := '1.0'} : TON;
+      ton_Timer_InMotion {InstructionName := 'TON'; LibVersion := '1.0'} : TON;
+      wthDog {InstructionName := 'TON'; LibVersion := '1.0'} : TON;
+      
+      // R_TRIG für Flankenerkennung wie im Original
+      rtrig_MotorON {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;
+      rtrig_StartHoming {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;
+      rtrig_DataTransfer {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;
+      rtrig_GripWorkpiece {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;
+      rtrig_ReleaseWorkpiece {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;
+   END_VAR
+   
+   VAR 
+      iDB_BasisMappingProgramAlarm { ExternalAccessible := 'False'; ExternalVisible := 'False'; ExternalWritable := 'False'; S7_SetPoint := 'False'} : "FB_BasisMappingProgramAlarm";
+      Meldungen_ZimmerGEH {InstructionName := 'Program_Alarm'; LibVersion := '1.0'; ExternalAccessible := 'False'; ExternalVisible := 'False'; ExternalWritable := 'False'; S7_SetPoint := 'False'} : Program_Alarm;
+   END_VAR
+
+BEGIN
+	(*
+	version |   Datum   | Autor       | Kommentar
+	--------|-----------|-------------|--------------------------------------------------
+	v0.1    |10.09.2025 | w011247@WI  | Erste Erstellung nach Template basierend auf Zimmer Original
+	--------|-----------|-------------|--------------------------------------------------
+	
+	--- Kurzbeschreibung ---
+	Schnittstellenbaustein für Zimmer GEH6000 Greifer.
+	Funktionen: Motor ein/aus, Referenzfahrt, Werkstück greifen/loslassen, Fehlerbehandlung
+	
+	--- Abhängig von ---
+	- ST_ZimmerGEH6000_DrvToPlc (Eingangstelegramm)
+	- ST_ZimmerGEH6000_PlcToDrv (Ausgangstelegramm)
+	- ST_ZimmerGEH_HMI (HMI-Schnittstelle)
+	- FB_BasisMappingProgramAlarm
+	
+	--- Alarmbeschreibung ---
+	error_state:
+	1: Motor nicht eingeschaltet
+	2: Greifer nicht referenziert
+	3: Datenübertragung fehlgeschlagen (Timeout)
+	4: Bewegung Timeout
+	5: Greifen fehlgeschlagen
+	6: Loslassen fehlgeschlagen
+	7: Referenzfahrt fehlgeschlagen
+	********************************************************************************)
+	
+	REGION Prüfung Parameteränderungen
+	    // Entsprechend Original-Code: Änderungserkennung für DataTransferRequired
+	    // DeviceMode und WorkpieceNo werden durch Funktion gesetzt, nicht durch HMI
+	    IF #device_mode_old <> #q_ZimmerGEH_PlcToDrv.DeviceMode
+	        OR #workpiece_no_old <> #q_ZimmerGEH_PlcToDrv.WorkpieceNo
+	        OR #position_tolerance_old <> #ZimmerGEH_HMI.Eingang.PositionTolerance
+	        OR #grip_force_old <> #ZimmerGEH_HMI.Eingang.GripForce
+	        OR #drive_velocity_old <> #ZimmerGEH_HMI.Eingang.DriveVelocity
+	        OR #base_position_old <> #ZimmerGEH_HMI.Eingang.BasePosition
+	        OR #work_position_old <> #ZimmerGEH_HMI.Eingang.WorkPosition
+	    THEN
+	        #ZimmerGEH_HMI.Ausgang.DataTransferRequired := TRUE;
+	    END_IF;
+	    
+	    // Alte Werte speichern
+	    #device_mode_old := #q_ZimmerGEH_PlcToDrv.DeviceMode;
+	    #workpiece_no_old := #q_ZimmerGEH_PlcToDrv.WorkpieceNo;
+	    #position_tolerance_old := #ZimmerGEH_HMI.Eingang.PositionTolerance;
+	    #grip_force_old := #ZimmerGEH_HMI.Eingang.GripForce;
+	    #drive_velocity_old := #ZimmerGEH_HMI.Eingang.DriveVelocity;
+	    #base_position_old := #ZimmerGEH_HMI.Eingang.BasePosition;
+	    #work_position_old := #ZimmerGEH_HMI.Eingang.WorkPosition;
+	END_REGION
+	
+	REGION Zeitüberwachungen
+	    // Timer entsprechend Original-Code
+	    #ton_Timer_DataTransfer(
+	        IN := #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer 
+	              AND NOT #i_ZimmerGEH_DrvToPlc.StatusWord.DataTransferOK
+	              AND #q_ZimmerGEH_PlcToDrv.DeviceMode <> 10, // Nicht während Homing
+	        PT := T#1s);
+	    
+	    #ton_Timer_InMotion(
+	        IN := #gripper_in_motion,
+	        PT := #ZimmerGEH_HMI.Eingang.MotionTimeout);
+	    
+	    // Timeout-Fehler setzen
+	    IF #ton_Timer_DataTransfer.Q THEN
+	        #ZimmerGEH_HMI.Ausgang.DataTransferError := TRUE;
+	        #error_state := 3;
+	    END_IF;
+	    
+	    IF #ton_Timer_InMotion.Q THEN
+	        #ZimmerGEH_HMI.Ausgang.MotionError := TRUE;
+	        #error_state := 4;
+	    END_IF;
+	END_REGION
+	
+	REGION Flankenerkennung
+	    // R_TRIG für alle Befehle wie im Original
+	    #rtrig_MotorON(CLK := #ZimmerGEH_HMI.Eingang.MotorON);
+	    #rtrig_StartHoming(CLK := #ZimmerGEH_HMI.Eingang.StartHoming);
+	    #rtrig_DataTransfer(CLK := #ZimmerGEH_HMI.Eingang.DataTransfer);
+	    #rtrig_GripWorkpiece(CLK := #ZimmerGEH_HMI.Eingang.GripWorkpiece);
+	    #rtrig_ReleaseWorkpiece(CLK := #ZimmerGEH_HMI.Eingang.ReleaseWorkpiece);
+	END_REGION
+	
+	REGION Eingangsdaten vom Greifer
+	    // StatusWord auswerten (entsprechend Original)
+	    #ZimmerGEH_HMI.Ausgang.HomingPositionOK := #i_ZimmerGEH_DrvToPlc.StatusWord.HomingPositionOK;
+	    #ZimmerGEH_HMI.Ausgang.MotorON := #i_ZimmerGEH_DrvToPlc.StatusWord.MotorON;
+	    #ZimmerGEH_HMI.Ausgang.InMotion := #i_ZimmerGEH_DrvToPlc.StatusWord.InMotion;
+	    #ZimmerGEH_HMI.Ausgang.MovementComplete := #i_ZimmerGEH_DrvToPlc.StatusWord.MovementComplete;
+	    #ZimmerGEH_HMI.Ausgang.BasePosition := #i_ZimmerGEH_DrvToPlc.StatusWord.BasePosition;
+	    #ZimmerGEH_HMI.Ausgang.WorkPosition := #i_ZimmerGEH_DrvToPlc.StatusWord.WorkPosition;
+	    #ZimmerGEH_HMI.Ausgang.Error := #i_ZimmerGEH_DrvToPlc.StatusWord.Error;
+	    
+	    // Weitere Daten
+	    #ZimmerGEH_HMI.Ausgang.Diagnosis := #i_ZimmerGEH_DrvToPlc.Diagnosis;
+	    #ZimmerGEH_HMI.Ausgang.ActualPosition := #i_ZimmerGEH_DrvToPlc.ActualPosition;
+	    
+	    // Interne Hilfsmerkbits
+	    #hmPower_on := #i_ZimmerGEH_DrvToPlc.StatusWord.MotorON;
+	    #gripper_in_motion := #i_ZimmerGEH_DrvToPlc.StatusWord.InMotion;
+	    #hmReferenced := #i_ZimmerGEH_DrvToPlc.StatusWord.HomingPositionOK;
+	    #hmGripped := #i_ZimmerGEH_DrvToPlc.StatusWord.WorkPosition; // Werkstück in Work-Position = gegriffen
+	END_REGION
+	
+	REGION Reset-Behandlung
+	    IF #ZimmerGEH_HMI.Eingang.StepReset OR #i_StoerungQuittieren THEN
+	        // Alle Zustandsmaschinen zurücksetzen
+	        #power_on_state := 0;
+	        #reference_state := 0;
+	        #grip_state := 0;
+	        #release_state := 0;
+	        #error_state := 0;
+	        
+	        // Ausgangsstatus zurücksetzen
+	        #ZimmerGEH_HMI.Ausgang.DataTransferError := FALSE;
+	        #ZimmerGEH_HMI.Ausgang.MotionError := FALSE;
+	        #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	        #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	        
+	        // ControlWord zurücksetzen
+	        #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := FALSE;
+	        #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToBase := FALSE;
+	        #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToWork := FALSE;
+	        #q_ZimmerGEH_PlcToDrv.ControlWord.ErrorReset := FALSE;
+	        
+	        // Störmeldeindikator zurücksetzen
+	        #iq_Stoermeldeindikator := FALSE;
+	        
+	        #ZimmerGEH_HMI.Ausgang.Status := 'Reset durchgeführt';
+	    END_IF;
+	END_REGION
+	
+	REGION Power ON Greifer
+	    IF #i_NotHalt_IO AND #i_Sicherheitskreis_IO THEN
+	        CASE #power_on_state OF
+	            0: // S0 Idle
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Motor Aus';
+	                IF #rtrig_MotorON.Q AND #error_state = 0 THEN
+	                    #ZimmerGEH_HMI.Ausgang.StepBusy := TRUE;
+	                    #ZimmerGEH_HMI.Ausgang.StepDone := FALSE;
+	                    #power_on_state := 1;
+	                END_IF;
+	                
+	            1: // Motor einschalten - Reset senden (wie Original Schritt 10)
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Greifer Reset';
+	                #q_ZimmerGEH_PlcToDrv.DeviceMode := 2; // Greifer-Reset
+	                #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := TRUE;
+	                #wthDog(IN := TRUE, PT := T#1s);
+	                IF #i_ZimmerGEH_DrvToPlc.StatusWord.DataTransferOK THEN
+	                    #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := FALSE;
+	                    #wthDog(IN := FALSE, PT := T#1s);
+	                    #power_on_state := 2;
+	                ELSIF #wthDog.Q THEN
+	                    #error_state := 3;
+	                    #power_on_state := -1;
+	                END_IF;
+	                
+	            2: // Warten auf Reset-Bestätigung (wie Original Schritt 30)
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Warten auf Reset-Bestätigung';
+	                IF NOT #i_ZimmerGEH_DrvToPlc.StatusWord.DataTransferOK THEN
+	                    #power_on_state := 3;
+	                END_IF;
+	                
+	            3: // Motor einschalten (wie Original Schritt 30-50)
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Motor einschalten';
+	                #q_ZimmerGEH_PlcToDrv.DeviceMode := 3; // Motor ON
+	                #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := TRUE;
+	                #wthDog(IN := TRUE, PT := T#1s);
+	                IF #i_ZimmerGEH_DrvToPlc.StatusWord.DataTransferOK THEN
+	                    #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := FALSE;
+	                    #wthDog(IN := FALSE, PT := T#1s);
+	                    #power_on_state := 4;
+	                ELSIF #wthDog.Q THEN
+	                    #error_state := 3;
+	                    #power_on_state := -1;
+	                END_IF;
+	                
+	            4: // Warten auf Motor-ON Bestätigung
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Motor bereit';
+	                IF NOT #i_ZimmerGEH_DrvToPlc.StatusWord.DataTransferOK THEN
+	                    #power_on_state := 100;
+	                    #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	                    #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	                END_IF;
+	                
+	            100: // Motor läuft
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Motor Ein - Betriebsbereit';
+	                // Überwachung auf Störungen
+	                IF #i_ZimmerGEH_DrvToPlc.StatusWord.Error THEN
+	                    #power_on_state := -2;
+	                END_IF;
+	                
+	            -1: // Fehler beim Einschalten
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Fehler Motor einschalten';
+	                #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	                #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	                
+	            -2: // Störung im Betrieb
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Störung Greifer';
+	                #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	                #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	        END_CASE;
+	    ELSE
+	        // Sicherheit nicht OK - Motor ausschalten
+	        #power_on_state := 0;
+	        #ZimmerGEH_HMI.Ausgang.Status := 'Sicherheitskreis NIO';
+	        #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := FALSE;
+	        #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToBase := FALSE;
+	        #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToWork := FALSE;
+	    END_IF;
+	END_REGION
+	
+	REGION Referenzfahrt
+	    IF #hmPower_on 
+	        AND #rtrig_StartHoming.Q 
+	        AND #error_state = 0
+	        AND #power_on_state = 100
+	    THEN
+	        CASE #reference_state OF
+	            0: // Start Referenzfahrt (wie Original Schritt 100-110)
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Referenzfahrt starten';
+	                #ZimmerGEH_HMI.Ausgang.StepBusy := TRUE;
+	                #ZimmerGEH_HMI.Ausgang.StepDone := FALSE;
+	                #q_ZimmerGEH_PlcToDrv.DeviceMode := 10; // Standard Homing
+	                #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := TRUE;
+	                #reference_state := 1;
+	                
+	            1: // Warten auf Bestätigung (wie Original Schritt 120)
+	                #wthDog(IN := TRUE, PT := T#2s);
+	                IF #i_ZimmerGEH_DrvToPlc.StatusWord.DataTransferOK THEN
+	                    #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := FALSE;
+	                    #wthDog(IN := FALSE, PT := T#2s);
+	                    #reference_state := 2;
+	                ELSIF #wthDog.Q THEN
+	                    #error_state := 7;
+	                    #reference_state := -1;
+	                END_IF;
+	                
+	            2: // Warten auf Referenzfahrt abgeschlossen (wie Original Schritt 130)
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Referenzfahrt läuft';
+	                #wthDog(IN := TRUE, PT := T#30s);
+	                IF NOT #i_ZimmerGEH_DrvToPlc.StatusWord.DataTransferOK 
+	                    AND #i_ZimmerGEH_DrvToPlc.StatusWord.HomingPositionOK THEN
+	                    #wthDog(IN := FALSE, PT := T#30s);
+	                    #reference_state := 100;
+	                    #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	                    #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	                    #ZimmerGEH_HMI.Ausgang.Status := 'Referenzfahrt abgeschlossen';
+	                ELSIF #wthDog.Q THEN
+	                    #error_state := 7;
+	                    #reference_state := -1;
+	                END_IF;
+	                
+	            100: // Referenzfahrt abgeschlossen
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Referenziert';
+	                #ZimmerGEH_HMI.Eingang.StartHoming := FALSE; // Auto-Reset
+	                #reference_state := 0;
+	                
+	            -1: // Fehler
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Fehler Referenzfahrt';
+	                #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	                #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	                #reference_state := 0;
+	        END_CASE;
+	    END_IF;
+	END_REGION
+	
+	REGION Werkstück Greifen
+	    IF #hmPower_on 
+	        AND #rtrig_GripWorkpiece.Q
+	        AND #error_state = 0
+	        AND #power_on_state = 100
+	        AND #i_FreigabeBewegung
+	        AND #hmReferenced
+	    THEN
+	        CASE #grip_state OF
+            0: // Datenübertragung Parameter (wie Original Schritt 200-220)
+                #ZimmerGEH_HMI.Ausgang.Status := 'Greifen - Parameter setzen';
+                #ZimmerGEH_HMI.Ausgang.StepBusy := TRUE;
+                #ZimmerGEH_HMI.Ausgang.StepDone := FALSE;
+                
+                // Parameter für Greifen setzen (Außengreifen DeviceMode 63, WorkpieceNo 0)
+                #q_ZimmerGEH_PlcToDrv.DeviceMode := 63; // Funktionsspezifischer DeviceMode für Außengreifen
+                #q_ZimmerGEH_PlcToDrv.WorkpieceNo := 0; // Standardwert für direktes Greifen
+                #q_ZimmerGEH_PlcToDrv.GripForce := #ZimmerGEH_HMI.Eingang.GripForce;
+                #q_ZimmerGEH_PlcToDrv.DriveVelocity := #ZimmerGEH_HMI.Eingang.DriveVelocity;
+                #q_ZimmerGEH_PlcToDrv.WorkPosition := #ZimmerGEH_HMI.Eingang.WorkPosition;
+                
+                #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := TRUE;
+                #grip_state := 1;	            1: // Warten auf Parameterübernahme
+	                #wthDog(IN := TRUE, PT := T#2s);
+	                IF #i_ZimmerGEH_DrvToPlc.StatusWord.DataTransferOK THEN
+	                    #q_ZimmerGEH_PlcToDrv.ControlWord.DataTransfer := FALSE;
+	                    #wthDog(IN := FALSE, PT := T#2s);
+	                    #grip_state := 2;
+	                ELSIF #wthDog.Q THEN
+	                    #error_state := 3;
+	                    #grip_state := -1;
+	                END_IF;
+	                
+	            2: // Bewegung zur WorkPosition starten (wie Original Schritt 600-650)
+	                IF NOT #i_ZimmerGEH_DrvToPlc.StatusWord.DataTransferOK THEN
+	                    #ZimmerGEH_HMI.Ausgang.Status := 'Greifen - Fahre zu WorkPosition';
+	                    #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToWork := TRUE;
+	                    #gripper_in_motion := TRUE;
+	                    #grip_state := 3;
+	                END_IF;
+	                
+	            3: // Warten auf Greifen abgeschlossen (wie Original Schritt 660)
+	                #wthDog(IN := TRUE, PT := #ZimmerGEH_HMI.Eingang.MotionTimeout);
+	                IF #i_ZimmerGEH_DrvToPlc.StatusWord.WorkPosition 
+	                    AND #i_ZimmerGEH_DrvToPlc.StatusWord.MovementComplete THEN
+	                    #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToWork := FALSE;
+	                    #gripper_in_motion := FALSE;
+	                    #wthDog(IN := FALSE, PT := #ZimmerGEH_HMI.Eingang.MotionTimeout);
+	                    #grip_state := 100;
+	                    #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	                    #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	                    #ZimmerGEH_HMI.Ausgang.Status := 'Werkstück gegriffen';
+	                ELSIF #wthDog.Q THEN
+	                    #error_state := 5;
+	                    #grip_state := -1;
+	                END_IF;
+	                
+	            100: // Greifen abgeschlossen
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Werkstück gegriffen';
+	                #ZimmerGEH_HMI.Eingang.GripWorkpiece := FALSE; // Auto-Reset
+	                #grip_state := 0;
+	                
+	            -1: // Fehler
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Fehler beim Greifen';
+	                #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToWork := FALSE;
+	                #gripper_in_motion := FALSE;
+	                #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	                #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	                #grip_state := 0;
+	        END_CASE;
+	    ELSIF NOT #i_FreigabeBewegung THEN
+	        #ZimmerGEH_HMI.Ausgang.Status := 'Bewegung gesperrt';
+	    ELSIF NOT #hmReferenced THEN
+	        #ZimmerGEH_HMI.Ausgang.Status := 'Nicht referenziert';
+	        #error_state := 2;
+	    END_IF;
+	END_REGION
+	
+	REGION Werkstück Loslassen
+	    IF #hmPower_on 
+	        AND #rtrig_ReleaseWorkpiece.Q
+	        AND #error_state = 0
+	        AND #power_on_state = 100
+	        AND #i_FreigabeBewegung
+	        AND #hmReferenced
+	    THEN
+	        CASE #release_state OF
+            0: // Bewegung zur BasePosition starten (wie Original Schritt 500-550)
+                #ZimmerGEH_HMI.Ausgang.Status := 'Loslassen - Fahre zu BasePosition';
+                #ZimmerGEH_HMI.Ausgang.StepBusy := TRUE;
+                #ZimmerGEH_HMI.Ausgang.StepDone := FALSE;
+                
+                // DeviceMode für Loslassen/BasePosition (DeviceMode 53 für Innengreifen öffnen)
+                #q_ZimmerGEH_PlcToDrv.DeviceMode := 53; // Funktionsspezifischer DeviceMode für Innengreifen öffnen  
+                #q_ZimmerGEH_PlcToDrv.WorkpieceNo := 0; // Standardwert
+                
+                #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToBase := TRUE;
+                #gripper_in_motion := TRUE;
+                #release_state := 1;	            1: // Warten auf Loslassen abgeschlossen (wie Original Schritt 560)
+	                #wthDog(IN := TRUE, PT := #ZimmerGEH_HMI.Eingang.MotionTimeout);
+	                IF #i_ZimmerGEH_DrvToPlc.StatusWord.BasePosition 
+	                    AND #i_ZimmerGEH_DrvToPlc.StatusWord.MovementComplete THEN
+	                    #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToBase := FALSE;
+	                    #gripper_in_motion := FALSE;
+	                    #wthDog(IN := FALSE, PT := #ZimmerGEH_HMI.Eingang.MotionTimeout);
+	                    #release_state := 100;
+	                    #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	                    #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	                    #ZimmerGEH_HMI.Ausgang.Status := 'Werkstück losgelassen';
+	                ELSIF #wthDog.Q THEN
+	                    #error_state := 6;
+	                    #release_state := -1;
+	                END_IF;
+	                
+	            100: // Loslassen abgeschlossen
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Werkstück losgelassen';
+	                #ZimmerGEH_HMI.Eingang.ReleaseWorkpiece := FALSE; // Auto-Reset
+	                #release_state := 0;
+	                
+	            -1: // Fehler
+	                #ZimmerGEH_HMI.Ausgang.Status := 'Fehler beim Loslassen';
+	                #q_ZimmerGEH_PlcToDrv.ControlWord.MoveToBase := FALSE;
+	                #gripper_in_motion := FALSE;
+	                #ZimmerGEH_HMI.Ausgang.StepBusy := FALSE;
+	                #ZimmerGEH_HMI.Ausgang.StepDone := TRUE;
+	                #release_state := 0;
+	        END_CASE;
+	    END_IF;
+	END_REGION
+	
+	REGION Ausgänge
+	    // Greifer bereit: Motor an, referenziert, kein Fehler
+	    #q_GripperReady := #hmPower_on AND #hmReferenced AND #error_state = 0;
+	    
+	    // HMI Status
+	    #ZimmerGEH_HMI.Ausgang.ErrorState := #error_state;
+	    
+	    // Status-Text setzen wenn nicht spezifisch gesetzt
+	    IF #ZimmerGEH_HMI.Ausgang.Status = '' THEN
+	        IF #error_state > 0 THEN
+	            #ZimmerGEH_HMI.Ausgang.Status := 'Fehler aktiv';
+	        ELSIF NOT #hmPower_on THEN
+	            #ZimmerGEH_HMI.Ausgang.Status := 'Motor aus';
+	        ELSIF NOT #hmReferenced THEN
+	            #ZimmerGEH_HMI.Ausgang.Status := 'Nicht referenziert';
+	        ELSE
+	            #ZimmerGEH_HMI.Ausgang.Status := 'Bereit';
+	        END_IF;
+	    END_IF;
+	END_REGION
+	
+	REGION Fehlerhandling ZimmerGEH
+	    #iDB_BasisMappingProgramAlarm
+	    (i_Signal := #i_ZimmerGEH_DrvToPlc.StatusWord.Error OR #error_state <> 0,
+	     i_Maschine := #ip_Maschine,
+	     i_Station := #ip_Station,
+	     i_Bmk := #ip_Bmk,
+	     i_FehlernummerObjekt := #error_state,
+	     i_IstWarnung := FALSE,
+	     iq_Meldung := #Meldungen_ZimmerGEH);
+	    
+	    // Ausgabe bei Störung
+	    IF #iDB_BasisMappingProgramAlarm.q_Stoerung THEN
+	        #iq_Stoermeldeindikator := #iDB_BasisMappingProgramAlarm.q_Stoerung OR #iq_Stoermeldeindikator;
+	        // Alle Bewegungsbefehle zurücksetzen bei Störung
+	        #ZimmerGEH_HMI.Eingang.StartHoming := FALSE;
+	        #ZimmerGEH_HMI.Eingang.GripWorkpiece := FALSE;
+	        #ZimmerGEH_HMI.Eingang.ReleaseWorkpiece := FALSE;
+	        #ZimmerGEH_HMI.Eingang.DataTransfer := FALSE;
+	    END_IF;
+	END_REGION
+	
+END_FUNCTION_BLOCK
