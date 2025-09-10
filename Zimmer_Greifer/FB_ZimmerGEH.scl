@@ -4,8 +4,20 @@ VERSION : 0.1
    VAR_INPUT 
       ip_Maschine : Int := 1;   // Maschinennummer
       ip_Station : Int;   // Stationsnummer
-      ip_Bmk : String[30];   // Begleitwert als String
-      i_StoerungQuittieren : Bool;   // Störung quittieren
+      ip_Bmk : String[30];   // Begleitwert als    ELSE
+        // Sicherheit nicht OK - Motor automatisch ausschalten
+        IF #hmPower_on AND #step_motor_off = 0 THEN
+            #step_motor_off := 1;
+        END_IF;
+        #power_on_state := 0;
+      i_StoerungQuittieren : Bool;   // Stör    // Ausgabe bei Störung
+    IF #iDB_BasisMappingProgramAlarm.q_Stoerung THEN
+        #iq_Stoermeldeindikator := #iDB_BasisMappingProgramAlarm.q_Stoerung OR #iq_Stoermeldeindikator;
+        #GEH_HMI.Eingang.StartHoming := FALSE;
+        #GEH_HMI.Eingang.MoveToBase := FALSE;
+        #GEH_HMI.Eingang.MoveToWork := FALSE;
+        #GEH_HMI.Eingang.DataTransfer := FALSE;
+    END_IF;ieren
       i_NotHalt_IO : Bool;   // Steuerung Ein
       i_Sicherheitskreis_IO : Bool;   // Sicherheitskreis OK / Freigabe Greifer
       i_FreigabeBewegung : Bool;   // 1=Greifer darf verfahren/keine Kollision
@@ -46,6 +58,9 @@ VERSION : 0.1
       wthDog {InstructionName := 'TON_TIME'; LibVersion := '1.0'; S7_SetPoint := 'False'} : TON_TIME;
       tmr_DataTransfer {InstructionName := 'TON_TIME'; LibVersion := '1.0'; S7_SetPoint := 'False'} : TON_TIME;
       tmr_Motion {InstructionName := 'TON_TIME'; LibVersion := '1.0'; S7_SetPoint := 'False'} : TON_TIME;
+	ton_MotorOnReset {InstructionName := 'TON_TIME'; LibVersion := '1.0'; S7_SetPoint := 'False'} : TON_TIME; // Überwachung Reset-Handshake (DeviceMode 2)
+	ton_MotorOnSwitch {InstructionName := 'TON_TIME'; LibVersion := '1.0'; S7_SetPoint := 'False'} : TON_TIME; // Überwachung Motor ON Handshake (DeviceMode 3)
+	ton_MotorOff {InstructionName := 'TON_TIME'; LibVersion := '1.0'; S7_SetPoint := 'False'} : TON_TIME; // Überwachung Motor OFF Handshake (DeviceMode 5)
    END_VAR
    
    VAR 
@@ -100,10 +115,11 @@ BEGIN
 	END_REGION
 	
 	REGION Zeitüberwachungen
-	    // Zeitüberwachung Datenübertragung
+	    // Zeitüberwachung Datenübertragung (wie Original: 1s, nicht aktiv während Standard-Homing (DeviceMode 10))
 	    #tmr_DataTransfer(IN := #q_GripperPlcToDrv.ControlWord.DataTransfer 
-	                      AND NOT #i_GripperDrvToPlc.StatusWord.DataTransferOK,
-	                      PT := T#2s);
+	                      AND NOT #i_GripperDrvToPlc.StatusWord.DataTransferOK
+	                      AND (#q_GripperPlcToDrv.DeviceMode <> 10),
+	                      PT := T#1s);
 	    
 	    // Zeitüberwachung Bewegung
 	    #tmr_Motion(IN := #gripper_in_motion,
@@ -119,6 +135,20 @@ BEGIN
 	        #GEH_HMI.Ausgang.MotionError := TRUE;
 	        #error_state := 4;
 	    END_IF;
+	END_REGION
+
+	REGION Timer Motor Ein/Aus
+	    // Handshake-Timer außerhalb der CASE-Sequenz
+	    // Aktiv solange DataTransfer für jeweiligen Schritt ansteht
+	    #ton_MotorOnReset(
+	        IN := (#power_on_state = 1) AND #q_GripperPlcToDrv.ControlWord.DataTransfer,
+	        PT := T#1s);
+	    #ton_MotorOnSwitch(
+	        IN := (#power_on_state = 3) AND #q_GripperPlcToDrv.ControlWord.DataTransfer,
+	        PT := T#1s);
+	    #ton_MotorOff(
+	        IN := (#step_motor_off = 1) AND #q_GripperPlcToDrv.ControlWord.DataTransfer,
+	        PT := T#1s);
 	END_REGION
 	
 	REGION Eingangsdaten vom Greifer
@@ -168,25 +198,21 @@ BEGIN
 	REGION Motor Ein/Aus
 	    IF #i_NotHalt_IO AND #i_Sicherheitskreis_IO THEN
 	        CASE #power_on_state OF
-	            0: // Idle
-	                #GEH_HMI.Ausgang.Status := 'Motor Aus';
-	                IF #GEH_HMI.Eingang.MotorON AND #error_state = 0 THEN
-	                    #GEH_HMI.Ausgang.StepBusy := TRUE;
-	                    #GEH_HMI.Ausgang.StepDone := FALSE;
-	                    #power_on_state := 1;
-	                END_IF;
-	                
-	            1: // Motor einschalten - Reset senden
+            0: // Idle - Motor automatisch bei Freigabe einschalten
+                #GEH_HMI.Ausgang.Status := 'Motor Aus';
+                IF #error_state = 0 THEN
+                    #GEH_HMI.Ausgang.StepBusy := TRUE;
+                    #GEH_HMI.Ausgang.StepDone := FALSE;
+                    #power_on_state := 1;
+                END_IF;	            1: // Motor einschalten - Reset senden
 	                #GEH_HMI.Ausgang.Status := 'Motor einschalten - Reset';
 	                #q_GripperPlcToDrv.DeviceMode := 2; // Greifer-Reset
 	                #q_GripperPlcToDrv.ControlWord.DataTransfer := TRUE;
-	                #wthDog(IN := TRUE, PT := T#1s);
 	                IF #i_GripperDrvToPlc.StatusWord.DataTransferOK THEN
 	                    #q_GripperPlcToDrv.ControlWord.DataTransfer := FALSE;
-	                    #wthDog(IN := FALSE, PT := T#1s);
 	                    #power_on_state := 2;
-	                ELSIF #wthDog.Q THEN
-	                    #error_state := 3;
+	                ELSIF #ton_MotorOnReset.Q THEN
+	                    #error_state := 3; // Timeout
 	                    #power_on_state := -1;
 	                END_IF;
 	                
@@ -200,13 +226,11 @@ BEGIN
 	                #GEH_HMI.Ausgang.Status := 'Motor einschalten';
 	                #q_GripperPlcToDrv.DeviceMode := 3; // Motor ON
 	                #q_GripperPlcToDrv.ControlWord.DataTransfer := TRUE;
-	                #wthDog(IN := TRUE, PT := T#1s);
 	                IF #i_GripperDrvToPlc.StatusWord.DataTransferOK THEN
 	                    #q_GripperPlcToDrv.ControlWord.DataTransfer := FALSE;
-	                    #wthDog(IN := FALSE, PT := T#1s);
 	                    #power_on_state := 4;
-	                ELSIF #wthDog.Q THEN
-	                    #error_state := 3;
+	                ELSIF #ton_MotorOnSwitch.Q THEN
+	                    #error_state := 3; // Timeout
 	                    #power_on_state := -1;
 	                END_IF;
 	                
@@ -218,14 +242,8 @@ BEGIN
 	                    #GEH_HMI.Ausgang.StepDone := TRUE;
 	                END_IF;
 	                
-	            100: // Motor läuft
-	                #GEH_HMI.Ausgang.Status := 'Motor Ein';
-	                IF #GEH_HMI.Eingang.MotorOFF THEN
-	                    #step_motor_off := 1;
-	                    #power_on_state := 0;
-	                END_IF;
-	                
-	            -1: // Fehler
+            100: // Motor läuft
+                #GEH_HMI.Ausgang.Status := 'Motor Ein';	            -1: // Fehler
 	                #GEH_HMI.Ausgang.Status := 'Fehler Motor einschalten';
 	                #GEH_HMI.Ausgang.StepBusy := FALSE;
 	                #GEH_HMI.Ausgang.StepDone := TRUE;
@@ -254,13 +272,11 @@ BEGIN
 	            #q_GripperPlcToDrv.DeviceMode := 5; // Motor OFF
 	            #q_GripperPlcToDrv.ControlWord.DataTransfer := TRUE;
 	            #gripper_in_motion := FALSE;
-	            #wthDog(IN := TRUE, PT := T#1s);
 	            IF #i_GripperDrvToPlc.StatusWord.DataTransferOK THEN
 	                #q_GripperPlcToDrv.ControlWord.DataTransfer := FALSE;
-	                #wthDog(IN := FALSE, PT := T#1s);
 	                #step_motor_off := 2;
-	            ELSIF #wthDog.Q THEN
-	                #step_motor_off := 0;
+	            ELSIF #ton_MotorOff.Q THEN
+	                #step_motor_off := 0; // Abbruch bei Timeout
 	            END_IF;
 	            
 	        2: // Warten auf Bestätigung
@@ -272,51 +288,45 @@ BEGIN
 	END_REGION
 	
 	REGION Referenzfahrt
+	    // Anpassung: wie Original nur Handshake blockierend, Homing selbst läuft asynchron (Busy endet nach Handshake)
 	    IF #hmPower_on 
 	        AND #GEH_HMI.Eingang.StartHoming 
 	        AND #error_state = 0
 	        AND #power_on_state = 100
 	    THEN
 	        CASE #reference_state OF
-	            0: // Start Referenzfahrt
-	                #GEH_HMI.Ausgang.Status := 'Referenzfahrt starten';
+	            0: // Start Homing Handshake
+	                #GEH_HMI.Ausgang.Status := 'Homing Start';
 	                #GEH_HMI.Ausgang.StepBusy := TRUE;
 	                #GEH_HMI.Ausgang.StepDone := FALSE;
-	                #q_GripperPlcToDrv.DeviceMode := 10; // Standard Homing
+	                #q_GripperPlcToDrv.DeviceMode := 10; // Standard Homing (optional erweiterbar)
 	                #q_GripperPlcToDrv.ControlWord.DataTransfer := TRUE;
+	                #wthDog(IN := TRUE, PT := T#1s);
 	                #reference_state := 1;
-	                
-	            1: // Warten auf Bestätigung
-	                #wthDog(IN := TRUE, PT := T#2s);
+	            1: // Warte DataTransferOK
 	                IF #i_GripperDrvToPlc.StatusWord.DataTransferOK THEN
 	                    #q_GripperPlcToDrv.ControlWord.DataTransfer := FALSE;
-	                    #wthDog(IN := FALSE, PT := T#2s);
+	                    #wthDog(IN := FALSE, PT := T#1s);
 	                    #reference_state := 2;
 	                ELSIF #wthDog.Q THEN
 	                    #error_state := 6;
 	                    #reference_state := -1;
 	                END_IF;
-	                
-	            2: // Warten auf Referenzfahrt abgeschlossen
-	                #GEH_HMI.Ausgang.Status := 'Referenzfahrt läuft';
-	                #wthDog(IN := TRUE, PT := T#30s);
-	                IF NOT #i_GripperDrvToPlc.StatusWord.DataTransferOK 
-	                    AND #i_GripperDrvToPlc.StatusWord.HomingPositionOK THEN
-	                    #wthDog(IN := FALSE, PT := T#30s);
-	                    #reference_state := 100;
+	            2: // Warte Ende Handshake (DataTransferOK FALSE)
+	                IF NOT #i_GripperDrvToPlc.StatusWord.DataTransferOK THEN
+	                    #reference_state := 100; // Homing läuft jetzt intern weiter
 	                    #GEH_HMI.Ausgang.StepBusy := FALSE;
 	                    #GEH_HMI.Ausgang.StepDone := TRUE;
-	                    #GEH_HMI.Ausgang.Status := 'Referenzfahrt abgeschlossen';
-	                ELSIF #wthDog.Q THEN
-	                    #error_state := 6;
-	                    #reference_state := -1;
+	                    #GEH_HMI.Ausgang.Status := 'Homing läuft';
 	                END_IF;
-	                
-	            100: // Referenzfahrt abgeschlossen
-	                #GEH_HMI.Ausgang.Status := 'Referenziert';
-	                
+	            100: // Asynchrone Überwachung
+	                IF #i_GripperDrvToPlc.StatusWord.HomingPositionOK THEN
+	                    #GEH_HMI.Ausgang.Status := 'Referenziert';
+	                    #GEH_HMI.Eingang.StartHoming := FALSE; // Auto-Reset Kommando
+	                    #reference_state := 0;
+	                END_IF;
 	            -1: // Fehler
-	                #GEH_HMI.Ausgang.Status := 'Fehler Referenzfahrt';
+	                #GEH_HMI.Ausgang.Status := 'Fehler Homing';
 	                #GEH_HMI.Ausgang.StepBusy := FALSE;
 	                #GEH_HMI.Ausgang.StepDone := TRUE;
 	                #reference_state := 0;
@@ -392,7 +402,7 @@ BEGIN
 	                    #q_GripperPlcToDrv.ControlWord.DataTransfer := TRUE;
 	                    #move_state := 1;
 	                ELSE
-	                    #move_state := 3;
+	                    #move_state := 3; // Direkt weiter
 	                END_IF;
 	                
 	            1: // Warten auf DeviceMode Bestätigung
@@ -411,7 +421,9 @@ BEGIN
 	                    #move_state := 3;
 	                END_IF;
 	                
-	            3: // Bewegung starten
+	            3: // Bewegung starten (optional: Richtungsmasken-Rücksetzung vorsehen)
+	                // HINWEIS: Im Original werden ggf. Richtungsflags (ControlWord_100/200) zurückgesetzt
+	                // Falls Statusbits vorhanden, hier ergänzen: wenn gesetztes Gegenrichtungs-Flag -> Reset Direction Flag Command (ControlWord=4)
 	                IF #GEH_HMI.Eingang.MoveToBase THEN
 	                    #GEH_HMI.Ausgang.Status := 'Fahre zu BasePosition';
 	                    #q_GripperPlcToDrv.ControlWord.MoveToBase := TRUE;

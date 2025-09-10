@@ -2,8 +2,6 @@ TYPE "ST_ZimmerGEH_HMI"
 VERSION : 0.1
    STRUCT
       Eingang : Struct
-         MotorON : Bool;   // Motor einschalten
-         MotorOFF : Bool;   // Motor ausschalten
          StartHoming : Bool;   // Referenzfahrt starten
          MoveToBase : Bool;   // Fahren zur BasePosition
          MoveToWork : Bool;   // Fahren zur WorkPosition
