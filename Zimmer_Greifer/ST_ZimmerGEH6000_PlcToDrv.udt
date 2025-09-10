@@ -1,24 +1,7 @@
 ﻿TYPE "ST_ZimmerGEH6000_PlcToDrv"
 VERSION : 0.1
    STRUCT
-      ControlWord : Struct
-         DataTransfer : Bool;
-         WritePDU : Bool;
-         ResetDirectionFlag : Bool;
-         Teach : Bool;
-         "Bit 4" : Bool;
-         "Bit 5" : Bool;
-         "Bit 6" : Bool;
-         "Bit 7" : Bool;
-         MoveToBase : Bool;
-         MoveToWork : Bool;
-         "JogToWork+" : Bool;
-         "JogToWork-" : Bool;
-         "Bit 12" : Bool;
-         "Bit 13" : Bool;
-         "Bit 14" : Bool;
-         "Bit 15" : Bool;
-      END_STRUCT;
+      ControlWord : Int;
       DeviceMode : Byte := 63;   // 1=Idle/Leerbefehl, 2= Greifer-Reset, 3= Motorregelung einschalten, 5=Motorregelung ausschalten, 11= Tippbetrieb 
       WorkpieceNo : Byte := 0;   // 0-32
       Reserve : Byte;
