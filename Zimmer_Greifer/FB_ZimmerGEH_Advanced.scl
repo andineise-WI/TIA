@@ -6,7 +6,13 @@ VERSION : 0.1
       ip_Station : Int;   // Stationsnummer
       ip_Bmk : String[30];   // Begleitwert als String
       i_StoerungQuittieren : Bool;   // Stoerung quittieren
-      i_NotHalt_IO : Bool;   // Steuerung Ein
+      i_NotHalt                #ZimmerGEH_HMI.Ausgang.Status := 'Greifen - Parameter setzen';
+                #ZimmerGEH_HMI.Ausgang.StepBusy := TRUE;
+                #ZimmerGEH_HMI.Ausgang.StepDone := FALSE;
+                
+                // Parameter aus HMI-UDT uebernehmen
+                #q_ZimmerGEH_PlcToDrv.DeviceMode := 62; // Innengreifen
+                #q_ZimmerGEH_PlcToDrv.WorkpieceNo := 0; // Standardwertool;   // Steuerung Ein
       i_Sicherheitskreis_IO : Bool;   // Sich	     	                // Parameter aus HMI-UDT uebernehmen
 	                #q_ZimmerGEH_PlcToDrv.DeviceMode := 63; // Aussengreifen (auch fuer Oeffnen)     0: // Parameter setzen fuer Loslassen
 	                #ZimmerGEH_HMI.Ausgang.Status := 'Loslassen - Parameter setzen';heitskreis OK / Freigabe Greifer
@@ -417,7 +423,7 @@ BEGIN
                 #ZimmerGEH_HMI.Ausgang.StepDone := FALSE;
                 
                 // Parameter aus HMI-UDT übernehmen
-                #q_ZimmerGEH_PlcToDrv.DeviceMode := 63; // Außengreifen (auch für Öffnen)
+                #q_ZimmerGEH_PlcToDrv.DeviceMode := 62; // Innengreifen (auch fuer Oeffnen)
                 #q_ZimmerGEH_PlcToDrv.WorkpieceNo := 0; // Standardwert
                 #q_ZimmerGEH_PlcToDrv.GripForce := INT_TO_BYTE(#ZimmerGEH_HMI.Eingang.GripForce);
                 #q_ZimmerGEH_PlcToDrv.DriveVelocity := INT_TO_BYTE(#ZimmerGEH_HMI.Eingang.DriveVelocity);
