@@ -1,24 +1,24 @@
-TYPE "ST_ZimmerGEH_HMI"
+﻿TYPE "ST_ZimmerGEH_HMI"
 VERSION : 0.1
    STRUCT
       Eingang : Struct
          StartHoming : Bool;   // Referenzfahrt starten
          MoveToBase : Bool;   // Fahren zur BasePosition
          MoveToWork : Bool;   // Fahren zur WorkPosition
-         DataTransfer : Bool;   // Datenübertragung starten
-         StepReset : Bool;   // Schrittkette zurücksetzen / Fehler quittieren
-         DeviceMode { S7_SetPoint := 'True'} : Int := 63;   // DeviceMode für Greifer (63=Außengreifen)
+         DataTransfer : Bool;   // DatenÃ¼bertragung starten
+         StepReset : Bool;   // Schrittkette zurÃ¼cksetzen / Fehler quittieren
+         DeviceMode { S7_SetPoint := 'True'} : Int := 0;   // DeviceMode fÃ¼r Greifer (63=AuÃŸengreifen)
          GripForce { S7_SetPoint := 'True'} : Int := 50;   // Greifkraft 1-100%
          DriveVelocity { S7_SetPoint := 'True'} : Int := 50;   // Geschwindigkeit 1-100%
          BasePosition { S7_SetPoint := 'True'} : Int := 750;   // BasePosition in 0,01mm
          WorkPosition { S7_SetPoint := 'True'} : Int := 1200;   // WorkPosition in 0,01mm
-         MotionTimeout { S7_SetPoint := 'True'} : Time := T#10s;   // Timeout für Bewegungen
+         MotionTimeout { S7_SetPoint := 'True'} : Time := T#10S;   // Timeout fÃ¼r Bewegungen
       END_STRUCT;
       Ausgang : Struct
-         StepBusy : Bool;   // Baustein ist beschäftigt
-         StepDone : Bool;   // Baustein ist bereit für neuen Befehl
-         DataTransferRequired : Bool;   // Datenübertragung erforderlich
-         DataTransferError : Bool;   // Fehler bei Datenübertragung
+         StepBusy : Bool;   // Baustein ist beschÃ¤ftigt
+         StepDone : Bool;   // Baustein ist bereit fÃ¼r neuen Befehl
+         DataTransferRequired : Bool;   // DatenÃ¼bertragung erforderlich
+         DataTransferError : Bool;   // Fehler bei DatenÃ¼bertragung
          MotionError : Bool;   // Fehler bei Bewegung (Timeout)
          HomingPositionOK : Bool;   // Referenzposition ist OK
          MotorON : Bool;   // Motor ist eingeschaltet
@@ -35,3 +35,4 @@ VERSION : 0.1
    END_STRUCT;
 
 END_TYPE
+

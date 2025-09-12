@@ -2,14 +2,6 @@
 VERSION : 0.1
    STRUCT
       StatusWord : Struct   // Statusbits
-         HomingPositionOK : Bool;   // Bit 0
-         MotorON : Bool;   // Bit 1
-         InMotion : Bool;   // Bit 2
-         MovementComplete : Bool;   // Bit 3
-         JogBaseActive : Bool;   // Bit 4
-         JogWorkActive : Bool;   // Bit 5
-         GripperPLCActive : Bool;   // Bit 6
-         bit7 : Bool;   // Bit 7
          BasePosition : Bool;   // Bit 8
          TeachPosition : Bool;   // Bit 9
          WorkPosition : Bool;   // Bit 10
@@ -18,8 +10,16 @@ VERSION : 0.1
          LastMoveWasBase : Bool;   // Bit 13
          LastMoveWasWork : Bool;   // Bit 14
          Error : Bool;   // Bit 15
+         HomingPositionOK : Bool;   // Bit 0
+         MotorON : Bool;   // Bit 1
+         InMotion : Bool;   // Bit 2
+         MovementComplete : Bool;   // Bit 3
+         JogBaseActive : Bool;   // Bit 4
+         JogWorkActive : Bool;   // Bit 5
+         GripperPLCActive : Bool;   // Bit 6
+         ControllerError : Bool;   // Bit 7
       END_STRUCT;
-      Diagnosis : UInt;   // Fehlercode
+      Diagnosis : Word;   // Fehlercode
       ActualPosition : UInt;   // aktuelle Backenposition [0.01 mm]
    END_STRUCT;
 
