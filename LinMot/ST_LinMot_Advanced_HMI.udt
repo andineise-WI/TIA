@@ -1,0 +1,48 @@
+﻿TYPE "ST_LinMot_Advanced_HMI"
+VERSION : 0.1
+   STRUCT
+      SwitchOn : Bool;   // Achse einschalten
+      Home : Bool;   // Achse referenzieren (muss anliegen bis Ausgang „Homed“ TRUE ist)
+      ErrorAcknowledge : Bool;   // Fehlerbestätigung auf steigende Flanke
+      JogPlus : Bool;   // Tippbetrieb positiv
+      JogMinus : Bool;   // Tippbetrieb negativ
+      Execute : Bool;   // Befehlsauslösung (steigende Flanke)
+      Position : Real;   // Zielposition in [mm]
+      Velocity : Real;   // Maximale Geschwindigkeit in [m/s]
+      Acceleration : Real;   // Beschleunigung in [m/s^2]
+      Deceleration : Real;   // Verzögerung in [m/s^2]
+      ForceLimit : Real;   // Kraftlimit das überschritten werden muss, damit in den Kraftregelmodus gewechselt wird in [N]
+      TargetForce : Real;   // Sollkraft nach Wechsel in den Kraftregelmodus in [N]
+      AxisState : UInt;   // PLC Open State: 0 = Undefined_LM, 1 = Disabled_LM, 2 = StandStill_LM, 3 = ErrorStop_LM, 4 = Stopping_LM, 5 = Homing_LM, 6 = DiscreteMotion_LM, 7 = ContinuousMotion_LM, 8 = SynchronizedMotion_LM
+      CommandAborted : Bool;   // Command aborted
+      ConfigChannelBusy : Bool;   // Configuration channel is busy
+      Config : Struct
+         IsRotaryMotor : Bool;
+         ForceScale : LReal;
+         TorqueForceScale : LReal;
+         ModuloFactor : DInt;
+         PosScaleNumerator : LReal;
+         PosScaleDenominator : LReal;
+         UnitScale : LReal;
+      END_STRUCT;
+      Status : Struct
+         OperationEnabled : Bool;   // Achse ist bestromt und bereit für Fahrbefehle
+         SwitchOnLocked : Bool;   // Anfahrsperre aktiv ( -> SwitchOn auf FALSE setzen)
+         Homed : Bool;   // Achse ist referenziert
+         MotionActive : Bool;   // Sollwertgenerierung aktiv (VAI- / Kurven-Interpolator)
+         Jogging : Bool;   // Achse bewegt sich im Tippbetrieb
+         Warning : Bool;   // Eine Warnung liegt an
+         Error : Bool;   // Ein Fehler liegt an
+         ErrorCode : UInt;   // Ist ein Fehler aufgetreten, wird an diesem Ausgang der Fehler Code angezeigt.
+         DemandPosition : LReal;   // Sollposition der Achse in mm
+         ActualPosition : LReal;   // Aktuelle Position der Achse in mm
+         ActualCurrent : LReal;   // Aktueller Motorstrom in A (Ampère)
+         Done : Bool;   // Befehl ausgeführt und Achse in Kraftregelmodus
+         Busy : Bool;   // Befehl aktiv
+         ErrorID : UInt;   // Fehlernummer
+         NrOfRevolutions { ExternalAccessible := 'False'; ExternalVisible := 'False'; ExternalWritable := 'False'} : DInt;
+      END_STRUCT;
+   END_STRUCT;
+
+END_TYPE
+

@@ -1,0 +1,142 @@
+﻿FUNCTION_BLOCK "LMmt_Halt"
+TITLE = LMmt_Halt
+{ S7_Optimized_Access := 'TRUE' }
+AUTHOR : fj
+//This function blocks stops the motor
+   VAR_INPUT 
+      Execute : Bool;   // Execute command
+      Deceleration : LReal;   // Stop deceleration in [Units/s^2]
+   END_VAR
+
+   VAR_OUTPUT 
+      Done : Bool;   // Command has been executed
+      Busy : Bool;   // Command running / FB Busy
+      CommandAborted : Bool;   // Command is aborted by another command
+      Error : Bool;   // Error detected
+      ErrorID : UInt;   // Error ID:01h: Axis not ready 02h: Axis already has command running 03h: Axis has error 04h: Command interrupted 05h: Command aborted06h: Invalid input(s)
+   END_VAR
+
+   VAR_IN_OUT 
+      Axis : "tstLM_Axis";   // Axis reference
+   END_VAR
+
+   VAR 
+      usiOldCmdCount { ExternalVisible := 'False'; ExternalWritable := 'False'} : USInt;   // internal ->
+      usiNewCmdCount { ExternalVisible := 'False'; ExternalWritable := 'False'} : USInt;   // internal ->
+      uiCState { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt;   // internal ->
+      uiFbState { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt;   // internal ->
+      rTrig {InstructionName := 'R_TRIG'; LibVersion := '1.0'; ExternalVisible := 'False'; ExternalWritable := 'False'; S7_SetPoint := 'False'} : R_TRIG;   // internal ->
+      udiTmpDWord { ExternalVisible := 'False'; ExternalWritable := 'False'} : UDInt;   // internal ->
+      rDeceleration { ExternalVisible := 'False'; ExternalWritable := 'False'} : LReal;   // internal ->
+      uiCmdHeader { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt := 16#0170;   // CommandHeader (017xh) of the "VAI Stop (017xh)" motion command
+   END_VAR
+
+
+BEGIN
+	(*Variablen ][ variables*)
+	#usiOldCmdCount := SHR(IN:=UINT_TO_USINT(SHL(IN:=#Axis.DrvToPlc.StateVar, N:=4)), N:=4);
+	#uiCState := SHR(IN:=#Axis.DrvToPlc.StateVar, N:=8);
+	
+	(*Interrupt / Abort detection*)
+	IF #Busy THEN
+	    IF #uiCState <> 16#08 THEN
+	        #uiFbState := 50; (*Error state*)
+	        #Error := TRUE;
+	        IF #uiCState = 16#04 THEN
+	            #ErrorID := 16#03; (*Axis has error*)
+	        ELSE
+	            #ErrorID := 16#04; (*Command interupted*)
+	        END_IF;
+	    ELSIF NOT #Error AND (#Axis.CommandAborted OR (#Axis.PlcToDrv.MCHeader <> #uiCmdHeader + #usiNewCmdCount)) THEN
+	        #uiFbState := 60; (*Command aborted*)
+	    END_IF;
+	END_IF;
+	
+	(*Flankenerkennung am Execute Eingang*)
+	(*Edge detection on Execute input*)
+	#rTrig(CLK := #Execute);
+	IF #rTrig.Q THEN
+	    IF #uiCState = 16#08 THEN (*Start command*)
+	        #Busy := TRUE;
+	        #uiFbState := 1;
+	    ELSIF #Busy THEN (*Restart command / New rising edge on execute input*)
+	        #Busy := TRUE;
+	        #uiFbState := 1;
+	    END_IF;
+	    
+	    IF #uiCState <> 16#08 OR (#Axis.AxisState = 4 (*Stopping_LM*)) THEN (*Axis not ready or in stopping state*)
+	        #uiFbState := 50; (*Error state*)
+	        #Error := TRUE;
+	        IF #uiCState = 16#04 THEN
+	            #ErrorID := 16#03; (*Axis has error*)
+	        ELSE
+	            #ErrorID := 16#01; (*Axis not ready*)
+	        END_IF;
+	    END_IF;
+	END_IF;
+	
+	(*State machine*)
+	CASE #uiFbState OF
+	    0:
+	        ;
+	        
+	    1:  (*Check inputs on valid value*)
+	        #Axis.AxisState := 6; //DiscreteMotion_LM; // Set MC state
+	        
+	        IF #Deceleration <= 0 OR #Deceleration * #Axis.Config.UnitScale > 429496729500.0 THEN
+	            #rDeceleration := 10000; (*In case of invalid input Deceleration value the stop deceleration is set to 10'000 Units/s^2 by default*)
+	        ELSE
+	            #rDeceleration := #Deceleration;
+	        END_IF;
+	        
+	        (*Befehlskopf mit CMD Count berechen und senden ][ Calculate and send command header*)
+	        #usiNewCmdCount := (#usiOldCmdCount + 1) MOD 16; (*MOD 16*)
+	        #Axis.PlcToDrv.MCHeader := 16#0000; (*Reset Header*)
+	        #Axis.PlcToDrv.MCHeader := #uiCmdHeader + #usiNewCmdCount;
+	        
+	        #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#rDeceleration * #Axis.Config.UnitScale / 100)); (*Deceleration*)
+	        #Axis.PlcToDrv.MCParaWord0 := UDINT_TO_UINT(#udiTmpDWord);
+	        #Axis.PlcToDrv.MCParaWord1 := UDINT_TO_UINT(ROR(IN:=#udiTmpDWord, N:=16));
+	
+	        #uiFbState := 2;
+	        
+	        
+	    2:  (*Prüfen ob Befehl ausgeführt ][ Check if command has been executed*)
+	        IF #usiOldCmdCount = #usiNewCmdCount AND #uiCState = 16#08 AND NOT #Axis.DrvToPlc.StateVar.%X5 THEN
+	            #Done := TRUE;
+	            #Busy := FALSE;
+	            #Axis.PlcToDrv.MCHeader := 16#0000 + #usiNewCmdCount; (*Send no operation*)
+	            #Axis.AxisState := 2; //Standstill_LM;
+	            #uiFbState := 3;
+	        END_IF;
+	        
+	    3:
+	        IF NOT #Execute THEN
+	            #uiFbState := 0;
+	            #Busy := FALSE;
+	            #Done := FALSE;
+	        END_IF;
+	        
+	    50:
+	        #Error := TRUE;
+	        #Busy := FALSE;
+	        #Done := FALSE;
+	        IF NOT #Execute THEN
+	            #uiFbState := 0;
+	            #Error := FALSE;
+	            #ErrorID := 0;
+	        END_IF;
+	        
+	    60:
+	        #CommandAborted := TRUE;
+	        #Error := FALSE;
+	        #Busy := FALSE;
+	        #Done := FALSE;
+	        IF NOT #Execute THEN
+	            #uiFbState := 0;
+	            #CommandAborted := FALSE;
+	        END_IF;
+	        
+	END_CASE;
+END_FUNCTION_BLOCK
+

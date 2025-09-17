@@ -1,0 +1,234 @@
+﻿FUNCTION_BLOCK "LMmt_MoveAbs"
+TITLE = LMmt_MoveAbs
+{ S7_Optimized_Access := 'TRUE' }
+AUTHOR : fj
+//This function blocks moves the motor to an absolute position
+   VAR_INPUT 
+      Execute : Bool;   // Execute command
+      Position : LReal;   // Target position in [Units]
+      Velocity : LReal;   // Maximal velocity in [Units/s]
+      Acceleration : LReal;   // Acceleration in [Units/s^2]
+      Deceleration : LReal;   // Deceleration in [Units/s^2]
+      Direction : UInt;   // Rotary motors only: 0=Legacy, 1=Positive, 2=Shortest Way, 3=Negative > (use only when modulo mode is enabled in the drive)
+   END_VAR
+
+   VAR_OUTPUT 
+      Done : Bool;   // Command has been executed*
+      Busy : Bool;   // Command running / FB Busy
+      CommandAborted : Bool;   // Command is aborted by another command
+      Error : Bool;   // Error detected
+      ErrorID : UInt;   // Error ID:01h: Axis not ready 02h: Axis already has command running 03h: Axis has error 04h: Command interrupted 05h: Command aborted06h: Invalid input(s)
+   END_VAR
+
+   VAR_IN_OUT 
+      Axis : "tstLM_Axis";   // Axis reference
+   END_VAR
+
+   VAR 
+      usiOldCmdCount { ExternalVisible := 'False'; ExternalWritable := 'False'} : USInt;   // internal ->
+      usiNewCmdCount { ExternalVisible := 'False'; ExternalWritable := 'False'} : USInt;   // internal ->
+      uiCState { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt;   // internal ->
+      uiFbState { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt;   // internal ->
+      rTrig {InstructionName := 'R_TRIG'; LibVersion := '1.0'; ExternalVisible := 'False'; ExternalWritable := 'False'; S7_SetPoint := 'False'} : R_TRIG;   // internal ->
+      udiTmpDWord { ExternalVisible := 'False'; ExternalWritable := 'False'} : UDInt;   // internal ->
+      uiCmdHeader { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt := 16#0000;   // internal ->
+      uiCmdHeaderM0 { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt := 16#0110;   // CommandHeader (011xh) of the "VAI Incr Dem Position (011xh)" motion command
+      uiCmdHeaderM1 { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt := 16#3C00;   // CommandHeader (3C0xh) of the "VAI Modulo Go To Pos Positive Direction (3C0xh)" motion command
+      uiCmdHeaderM2 { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt := 16#3C20;   // CommandHeader (3C2xh) of the "VAI Modulo Go To Pos Shortest Way (3C2xh)" motion command
+      uiCmdHeaderM3 { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt := 16#3C10;   // CommandHeader (3C1xh) of the "VAI Modulo Go To Pos Negative Direction (3C1xh)" motion command
+      uiCmdHeaderM4 { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt := 16#0100;   // CommandHeader (010xh) of the "VAI Go To Position (010xh)" motion command
+   END_VAR
+
+
+BEGIN
+	(*Variablen ][ variables*)
+	#usiOldCmdCount := SHR(IN:=UINT_TO_USINT(SHL(IN:=#Axis.DrvToPlc.StateVar, N:=4)), N:=4);
+	#uiCState := SHR(IN:=#Axis.DrvToPlc.StateVar, N:=8);
+	
+	(*Interrupt / Abort detection*)
+	IF #Busy THEN
+	    IF #uiCState <> 16#08 THEN
+	        #uiFbState := 50; (*Error state*)
+	        #Error := TRUE;
+	        IF #uiCState = 16#04 THEN
+	            #ErrorID := 16#03; (*Axis has error*)
+	        ELSE
+	            #ErrorID := 16#04; (*Command interupted*)
+	        END_IF;
+	    ELSIF NOT #Error AND (#Axis.CommandAborted OR (#Axis.PlcToDrv.MCHeader <> #uiCmdHeader + #usiNewCmdCount)) THEN
+	        #uiFbState := 60; (*Command aborted*)
+	    END_IF;
+	END_IF;
+	
+	(*Flankenerkennung am Execute Eingang*)
+	(*Edge detection on Execute input*)
+	#rTrig(CLK := #Execute);
+	IF #rTrig.Q THEN
+	    IF #uiCState = 16#08 THEN (*Start command*)
+	        #Busy := TRUE;
+	        IF #Axis.Config.IsRotaryMotor THEN
+	            #uiFbState := 1; (*Send command rotary*)
+	        ELSE
+	            #uiFbState := 2; (*Send command linear*)
+	        END_IF;
+	    ELSIF #Busy THEN (*Restart command / New rising edge on execute input*)
+	        IF #Axis.Config.IsRotaryMotor THEN
+	            #uiFbState := 1; (*Send command rotary*)
+	        ELSE
+	            #uiFbState := 2; (*Send command linear*)
+	        END_IF;
+	    END_IF;
+	    
+	    IF #uiCState <> 16#08 OR (#Axis.AxisState = 4 (*Stopping_LM*)) THEN (*Axis not ready or in stopping state*)
+	        #uiFbState := 50; (*Error state*)
+	        #Error := TRUE;
+	        IF #uiCState = 16#04 THEN
+	            #ErrorID := 16#03; (*Axis has error*)
+	        ELSE
+	            #ErrorID := 16#01; (*Axis not ready*)
+	        END_IF;
+	    END_IF;
+	END_IF;
+	
+	(*State machine*)
+	CASE #uiFbState OF
+	    0:
+	        ;
+	        
+	    1:  (*Rotary Motor: Check inputs on valid value*)
+	        IF (0 <= #Position AND #Position * #Axis.Config.UnitScale <= #Axis.Config.ModuloFactor)
+	            AND (0 < #Velocity AND #Velocity * #Axis.Config.UnitScale <= 42949672950.0)
+	            AND (0 < #Acceleration AND #Acceleration * #Axis.Config.UnitScale <= 429496729500.0)
+	            AND (0 < #Deceleration AND #Deceleration * #Axis.Config.UnitScale <= 429496729500.0)
+	            AND #Axis.Config.ModuloFactor > 0
+	            AND (0 <= #Direction AND #Direction <= 3)
+	        THEN
+	            
+	            #Axis.AxisState := 6; //DiscreteMotion_LM; // Set MC state        
+	            
+	            (*Befehlskopf mit CMD Count berechen und senden ][ Calculate and send command header*)
+	            #usiNewCmdCount := (#usiOldCmdCount + 1) MOD 16; (*Command counter MOD 16*)
+	            #Axis.PlcToDrv.MCHeader := #uiCmdHeader := 16#0000; (*Reset Headers*)
+	            
+	            CASE #Direction OF (*Mode selection*)
+	                0:  // Default: Legacy mode
+	                    #uiCmdHeader := #uiCmdHeaderM0;
+	                1:  // Positive direction (modulo mode must be enabled in the drive)
+	                    #uiCmdHeader := #uiCmdHeaderM1;
+	                2:  // Shortest way (modulo mode must be enabled in the drive)
+	                    #uiCmdHeader := #uiCmdHeaderM2;
+	                3:  // Negative direction (modulo mode must be enabled in the drive)
+	                    #uiCmdHeader := #uiCmdHeaderM3;
+	                ELSE
+	                    // Default: Legacy mode
+	                    #uiCmdHeader := #uiCmdHeaderM0;
+	            END_CASE;
+	            
+	            #Axis.PlcToDrv.MCHeader := #uiCmdHeader + #usiNewCmdCount;
+	            
+	            IF #Direction <= 0 OR #Direction > 3 THEN // Legacy mode
+	                #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT((#Position - #Axis.Status.DemandPosition) * #Axis.Config.UnitScale)); (*Position increment*)
+	            ELSE // Positive, negative, shortest way 
+	                #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#Position * #Axis.Config.UnitScale)); (*Target angle*)
+	            END_IF;
+	            
+	            #Axis.PlcToDrv.MCParaWord0 := UDINT_TO_UINT(#udiTmpDWord);
+	            #Axis.PlcToDrv.MCParaWord1 := UDINT_TO_UINT(ROR(IN:=#udiTmpDWord, N:=16));
+	            
+	            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#Velocity * #Axis.Config.UnitScale / 10)); (*Velocity*)
+	            #Axis.PlcToDrv.MCParaWord2 := UDINT_TO_UINT(#udiTmpDWord);
+	            #Axis.PlcToDrv.MCParaWord3 := UDINT_TO_UINT(ROR(IN:=#udiTmpDWord, N:=16));
+	            
+	            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#Acceleration * #Axis.Config.UnitScale / 100)); (*Acceleration*)
+	            #Axis.PlcToDrv.MCParaWord4 := UDINT_TO_UINT(#udiTmpDWord);
+	            #Axis.PlcToDrv.MCParaWord5 := UDINT_TO_UINT(ROR(IN:=#udiTmpDWord, N:=16));
+	            
+	            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#Deceleration * #Axis.Config.UnitScale / 100)); (*Deceleration*)
+	            #Axis.PlcToDrv.MCParaWord6 := UDINT_TO_UINT(#udiTmpDWord);
+	            #Axis.PlcToDrv.MCParaWord7 := UDINT_TO_UINT(ROR(IN:=#udiTmpDWord, N:=16));
+	
+	            #uiFbState := 3; (*Check done*)
+	        ELSE
+	            #uiFbState := 50; (*Error state*)
+	            #Error := TRUE;
+	            #ErrorID := 16#06; (*Invalid input(s)*)
+	        END_IF;
+	        
+	    2:  (*Linear motor: Check inputs on valid value*)
+	        IF (#Position * #Axis.Config.UnitScale) >= -2147483648.0
+	            AND (#Position * #Axis.Config.UnitScale) <= 2147483647.0
+	            AND (0 < #Velocity AND #Velocity * #Axis.Config.UnitScale <= 42949672950.0)
+	            AND (0 < #Acceleration AND #Acceleration * #Axis.Config.UnitScale <= 429496729500.0)
+	            AND (0 < #Deceleration AND #Deceleration * #Axis.Config.UnitScale <= 429496729500.0)
+	        THEN
+	            
+	            #Axis.AxisState := 6; //DiscreteMotion_LM; // Set MC state    
+	            
+	            (*Befehlskopf mit CMD Count berechen und senden ][ Calculate and send command header*)
+	            #usiNewCmdCount := (#usiOldCmdCount + 1) MOD 16; (*MOD 16*)
+	            #Axis.PlcToDrv.MCHeader := #uiCmdHeader := 16#0000; (*Reset Headers*)
+	            #uiCmdHeader := #uiCmdHeaderM4;
+	            #Axis.PlcToDrv.MCHeader := #uiCmdHeaderM4 + #usiNewCmdCount;
+	            
+	            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#Position * #Axis.Config.UnitScale)); (*Target Position*)
+	            #Axis.PlcToDrv.MCParaWord0 := UDINT_TO_UINT(#udiTmpDWord);
+	            #Axis.PlcToDrv.MCParaWord1 := UDINT_TO_UINT(ROR(IN:=#udiTmpDWord, N:=16));
+	            
+	            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#Velocity * #Axis.Config.UnitScale / 10)); (*Velocity*)
+	            #Axis.PlcToDrv.MCParaWord2 := UDINT_TO_UINT(#udiTmpDWord);
+	            #Axis.PlcToDrv.MCParaWord3 := UDINT_TO_UINT(ROR(IN:=#udiTmpDWord, N:=16));
+	            
+	            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#Acceleration * #Axis.Config.UnitScale / 100)); (*Acceleration*)
+	            #Axis.PlcToDrv.MCParaWord4 := UDINT_TO_UINT(#udiTmpDWord);
+	            #Axis.PlcToDrv.MCParaWord5 := UDINT_TO_UINT(ROR(IN:=#udiTmpDWord, N:=16));
+	            
+	            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#Deceleration * #Axis.Config.UnitScale / 100)); (*Deceleration*)
+	            #Axis.PlcToDrv.MCParaWord6 := UDINT_TO_UINT(#udiTmpDWord);
+	            #Axis.PlcToDrv.MCParaWord7 := UDINT_TO_UINT(ROR(IN:=#udiTmpDWord, N:=16));
+	
+	            #uiFbState := 3; (*Check done*)
+	        ELSE
+	            #uiFbState := 50; (*Error state*)
+	            #Error := TRUE;
+	            #ErrorID := 16#06; (*Invalid input(s)*)
+	        END_IF;
+	        
+	    3:  (*Prüfen ob Befehl ausgeführt ][ Check if command has been executed*)
+	        IF #usiOldCmdCount = #usiNewCmdCount AND #uiCState = 16#08 AND #Axis.DrvToPlc.StateVar.%X6 THEN
+	            #Done := TRUE;
+	            #Busy := FALSE;
+	            #Axis.PlcToDrv.MCHeader := 16#0000 + #usiNewCmdCount; (*Send no operation*)
+	            #Axis.AxisState := 2; //Standstill_LM;
+	            #uiFbState := 4;
+	        END_IF;
+	        
+	    4:
+	        IF NOT #Execute THEN
+	            #uiFbState := 0;
+	            #Busy := FALSE;
+	            #Done := FALSE;
+	        END_IF;
+	        
+	    50:
+	        #Error := TRUE;
+	        #Busy := FALSE;
+	        #Done := FALSE;
+	        IF NOT #Execute THEN
+	            #uiFbState := 0;
+	            #Error := FALSE;
+	            #ErrorID := 0;
+	        END_IF;
+	        
+	    60:
+	        #CommandAborted := TRUE;
+	        #Error := FALSE;
+	        #Busy := FALSE;
+	        #Done := FALSE;
+	        IF NOT #Execute THEN
+	            #uiFbState := 0;
+	            #CommandAborted := FALSE;
+	        END_IF;
+	        
+	END_CASE;
+END_FUNCTION_BLOCK
+

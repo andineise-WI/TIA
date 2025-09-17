@@ -1,0 +1,84 @@
+﻿FUNCTION_BLOCK "LMct_Reset"
+TITLE = LMct_Reset
+{ S7_Optimized_Access := 'TRUE' }
+AUTHOR : fj
+//This function block makes the transition from the state ‘ErrorStop’ to ‘Standstill’ or ‘Disabled’ by resetting all internal axis-related errors – it does not affect the output of the FB instances.
+   VAR_INPUT 
+      Execute : Bool;   // Execute command
+   END_VAR
+
+   VAR_OUTPUT 
+      Done : Bool;   // Command has been executed
+      Busy : Bool;   // Command running / FB Busy
+      CommandAborted : Bool;   // Command is aborted by another command
+      Error : Bool;   // Error detected
+      ErrorID : UInt;   // Error ID:01h: Axis not ready 02h: Axis already has command running 03h: Axis has error 04h: Command interrupted 05h: Command aborted06h: Invalid input(s)
+   END_VAR
+
+   VAR_IN_OUT 
+      Axis : "tstLM_Axis";   // Axis reference
+   END_VAR
+
+   VAR 
+      uiFbState { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt;   // internal ->
+      rTrig {InstructionName := 'R_TRIG'; LibVersion := '1.0'; ExternalVisible := 'False'; ExternalWritable := 'False'; S7_SetPoint := 'False'} : R_TRIG;   // internal ->
+      udiTmpDWord { ExternalVisible := 'False'; ExternalWritable := 'False'} : UDInt;   // internal ->
+   END_VAR
+
+
+BEGIN
+	(*Flankenerkennung am Execute Eingang*)
+	(*Edge detection on Execute input*)
+	#rTrig(CLK := #Execute);
+	IF #rTrig.Q THEN (*Start command*)
+	    #Busy := TRUE;
+	    #uiFbState := 1;
+	ELSIF #rTrig.Q AND #Busy THEN (*Restart command / New rising edge on execute input*)
+	    #uiFbState := 1;
+	END_IF;
+	
+	(*State machine*)
+	CASE #uiFbState OF
+	    0:
+	        ;
+	        
+	    1:  (*Set Error Bit*)
+	        IF #Axis.DrvToPlc.StatusWord.%X3 AND #Axis.PlcToDrv.ControlWord.%X7 THEN
+	            #Axis.PlcToDrv.ControlWord.%X7 := FALSE;
+	        ELSIF #Axis.DrvToPlc.StatusWord.%X3 AND NOT #Axis.PlcToDrv.ControlWord.%X7 THEN
+	            #Axis.PlcToDrv.ControlWord.%X7 := TRUE;
+	        ELSIF NOT #Axis.DrvToPlc.StatusWord.%X3 THEN // Check Error Acknowledged
+	            #Axis.PlcToDrv.ControlWord.%X7 := FALSE;
+	            #Axis.CommandAborted := FALSE;
+	            #Busy := FALSE;
+	            #Done := TRUE;
+	            #uiFbState := 3;
+	        END_IF;
+	        
+	        IF #Axis.DrvToPlc.StatusWord.%X12 THEN
+	            #uiFbState := 50; (*Error state*)
+	            #Error := TRUE;
+	            #ErrorID := 16#08; (*Axis has fatal error*)
+	        END_IF;
+	        
+	    3:
+	        IF NOT #Execute THEN
+	            #uiFbState := 0;
+	            #Busy := FALSE;
+	            #Done := FALSE;
+	        END_IF;
+	        
+	    50:
+	        #Error := TRUE;
+	        #Busy := FALSE;
+	        #Done := FALSE;
+	        IF NOT #Execute THEN
+	            #Axis.PlcToDrv.ControlWord.%X7 := FALSE;
+	            #uiFbState := 0;
+	            #Error := FALSE;
+	            #ErrorID := 0;
+	        END_IF;
+	        
+	END_CASE;
+END_FUNCTION_BLOCK
+

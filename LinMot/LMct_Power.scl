@@ -1,0 +1,315 @@
+﻿FUNCTION_BLOCK "LMct_Power"
+TITLE = LMct_Power
+{ S7_Optimized_Access := 'TRUE' }
+AUTHOR : fj
+//This function block controls the power stage (On or Off)
+   VAR_INPUT 
+      Enable : Bool;   // As long as ‘Enable’ is true, power is being enabled
+   END_VAR
+
+   VAR_OUTPUT 
+      Status : Bool;   // Effective state of the power stage
+      Busy : Bool;   // Busy
+      Error : Bool;   // Error detected
+      ErrorID : UInt;   // Error ID
+   END_VAR
+
+   VAR_IN_OUT 
+      Axis : "tstLM_Axis";   // Axis reference
+   END_VAR
+
+   VAR 
+      uiState { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt;   // internal ->
+      rTrigHome {InstructionName := 'R_TRIG'; LibVersion := '1.0'; ExternalVisible := 'False'; ExternalWritable := 'False'; S7_SetPoint := 'False'} : R_TRIG;   // internal ->
+      dMotorDemandAngle { ExternalVisible := 'False'; ExternalWritable := 'False'} : DInt;   // internal ->
+      dMotorActualAngle { ExternalVisible := 'False'; ExternalWritable := 'False'} : DInt;   // internal ->
+      dOldMotorDemandAngle { ExternalVisible := 'False'; ExternalWritable := 'False'} : DInt;   // internal ->
+      dOldMotorActualAngle { ExternalVisible := 'False'; ExternalWritable := 'False'} : DInt;   // internal ->
+      dModN { ExternalVisible := 'False'; ExternalWritable := 'False'} : DInt;   // internal ->
+      dCmdWD { ExternalVisible := 'False'; ExternalWritable := 'False'} : DInt;   // internal ->
+      uiCfgRWLastCmd { ExternalVisible := 'False'; ExternalWritable := 'False'} : UInt;   // internal ->
+      TON_WD {InstructionName := 'TON_TIME'; LibVersion := '1.0'; ExternalVisible := 'False'; ExternalWritable := 'False'; S7_SetPoint := 'False'} : TON_TIME;   // internal ->
+   END_VAR
+
+
+BEGIN
+	(*=============================================================================
+	*  Check and correct axis configuration
+	===============================================================================*)   
+	IF #Axis.Config.ForceScale <= 0 THEN
+	    #Axis.Config.ForceScale := 0.1;
+	END_IF; (* [N] . 0.1 = default for LinMot linear motors *)
+	IF #Axis.Config.TorqueForceScale <= 0 THEN
+	    #Axis.Config.TorqueForceScale := 0.00057295779513082;
+	END_IF; (* [Nm] *)
+	IF #Axis.Config.ModuloFactor <= 0 THEN
+	    #Axis.Config.ModuloFactor := 360000;
+	END_IF; (* Increments per modulo *)
+	IF #Axis.Config.PosScaleNumerator <= 0 THEN
+	    #Axis.Config.PosScaleNumerator := 10000;
+	END_IF; (* Increments per motor revolution. 10'000 = default for LinMot linear motors *)
+	IF #Axis.Config.PosScaleDenominator <= 0 THEN
+	    #Axis.Config.PosScaleDenominator := 1;
+	END_IF; (* Units per motor revolution. 1 = default for LinMot linear motors*)
+	
+	#Axis.Config.UnitScale := #Axis.Config.PosScaleNumerator / #Axis.Config.PosScaleDenominator;
+	
+	(*=============================================================================
+	*  Read actual current
+	===============================================================================*)  
+	(*Workaround for different XML current definitions (16Bit/32Bit)*)
+	IF #Axis.DrvToPlc.ComActualCurrent32 = 0 AND #Axis.DrvToPlc.ComActualCurrent16 = 0 THEN
+	    #Axis.Status.ActualCurrent := 0;
+	ELSIF #Axis.DrvToPlc.ComActualCurrent32 <> 0 AND #Axis.DrvToPlc.ComActualCurrent16 = 0 THEN
+	    #Axis.Status.ActualCurrent := DINT_TO_LREAL(#Axis.DrvToPlc.ComActualCurrent32) / 1000;
+	ELSIF #Axis.DrvToPlc.ComActualCurrent32 = 0 AND #Axis.DrvToPlc.ComActualCurrent16 <> 0 THEN
+	    #Axis.Status.ActualCurrent := INT_TO_LREAL(#Axis.DrvToPlc.ComActualCurrent16) / 1000;
+	ELSE
+	    #Axis.Status.ActualCurrent := DINT_TO_LREAL(#Axis.DrvToPlc.ComActualCurrent32) / 1000; (*If both 16/32Bit currents aren't 0 32Bit has higher priority*)
+	END_IF;
+	
+	(*=============================================================================
+	*  Status variables
+	===============================================================================*)    
+	#uiState := SHR(IN:=#Axis.DrvToPlc.StateVar, N:=8);
+	
+	#Axis.Status.OperationEnabled := #Axis.DrvToPlc.StatusWord.%X0;
+	#Axis.Status.Error := #Axis.DrvToPlc.StatusWord.%X3;
+	#Axis.Status.SwitchOnLocked := #Axis.DrvToPlc.StatusWord.%X6;
+	#Axis.Status.Warning := #Axis.DrvToPlc.StatusWord.%X7;
+	#Axis.Status.Homed := #Axis.DrvToPlc.StatusWord.%X11;
+	#Axis.Status.MotionActive := #Axis.DrvToPlc.StatusWord.%X13;
+	
+	IF #Axis.Status.Error THEN
+	    #Axis.Status.ErrorCode := #Axis.DrvToPlc.StateVar AND 16#00FF;
+	ELSE
+	    #Axis.Status.ErrorCode := 0;
+	END_IF;
+	
+	#Status := #Axis.Status.OperationEnabled;
+	
+	IF #uiState <> 16#08 THEN
+	    #Axis.PlcToDrv.MCHeader := 16#0000; (*Reset Header to prevent "MC Cmd in wrong state" error*)
+	    #Axis.CommandAborted := FALSE;
+	END_IF;
+	
+	(*=============================================================================
+	*  Force ControlWord Bits (Support for -MI Drives)
+	===============================================================================*) 
+	#Axis.PlcToDrv.ControlWord.%X2 := TRUE; // /Quick Stop
+	#Axis.PlcToDrv.ControlWord.%X3 := TRUE; // Enable Operation
+	#Axis.PlcToDrv.ControlWord.%X4 := TRUE; // /Abort
+	#Axis.PlcToDrv.ControlWord.%X5 := TRUE; // /Freeze
+	
+	(*=============================================================================
+	*  State Machine
+	===============================================================================*)    
+	
+	// Switch On
+	IF NOT #Enable OR #Axis.Status.SwitchOnLocked THEN    // Reset Switch On
+	    #Axis.PlcToDrv.ControlWord.%X0 := FALSE;
+	ELSIF #Enable AND NOT #Error THEN                     // Switch On
+	    #Axis.PlcToDrv.ControlWord.%X0 := TRUE;
+	    #Busy := TRUE;
+	END_IF;
+	
+	
+	CASE #uiState OF
+	        
+	        (*State 0: Not Ready to Switch On*)
+	    00:
+	        #Axis.AxisState := 1; //Disabled_LM;
+	        
+	        (*State 1: Not Ready to Switch On*)
+	    01:
+	        #Axis.AxisState := 1; //Disabled_LM;
+	        #Busy := FALSE;
+	        
+	        (*State 2: Ready to Switch On*)
+	    02:
+	        #Axis.AxisState := 1; //Disabled_LM;
+	        
+	        (*State 3: Setup Error State*)
+	    03:
+	        #Axis.AxisState := 3; //ErrorStop_LM;
+	        
+	        (*State 4: Error*)
+	    04:
+	        #Busy := FALSE;
+	        #Axis.AxisState := 3; //ErrorStop_LM;
+	        
+	        (*State 5: HW Test*)
+	    05:
+	        #Axis.AxisState := 1; //Disabled_LM;
+	        
+	        (*State 6: Ready to Operate*)
+	    06:
+	        #Axis.AxisState := 1; //Disabled_LM;
+	        
+	        (*State 7: Brake Release*)
+	    07:
+	        #Axis.AxisState := 1; //Disabled_LM;
+	        
+	        (*State 8: Operation Enabled*)
+	    08:
+	        IF NOT #Axis.DrvToPlc.StatusWord.%X13
+	            AND ((#Axis.PlcToDrv.MCHeader AND 16#FFF0) = 16#0000)
+	            AND NOT (#Axis.AxisState = 5) //Homing_LM)
+	            AND NOT (#Axis.AxisState = 4) //Stopping_LM)
+	        THEN
+	            #Axis.AxisState := 2; //StandStill_LM;
+	        END_IF;
+	        
+	        IF NOT #Axis.DrvToPlc.StatusWord.%X13
+	            AND NOT ((#Axis.PlcToDrv.MCHeader AND 16#FFF0) = 16#0000)
+	            AND NOT (#Axis.AxisState = 5) //Homing_LM)
+	            AND NOT (#Axis.AxisState = 4) //Stopping_LM)
+	        THEN
+	            #dCmdWD := #dCmdWD + 1; // Increase watchdog counter
+	        ELSE
+	            #dCmdWD := 0; // Reset watchdog counter
+	        END_IF;
+	        
+	        // WatchDog disabled for now
+	        (*IF #dCmdWD > 5 THEN // If watchdog value is reached          
+	            #Axis.PlcToDrv.MCHeader := (#Axis.PlcToDrv.MCHeader AND 16#000F); // Reset Header
+	            #dCmdWD := 0; // Reset watchdog counter
+	        END_IF;*)
+	        
+	        (*State 9: Homing*)
+	    09:
+	        ;
+	        
+	        (*State 14: Error Behaviour QuickStop*)
+	    14:
+	        #Axis.AxisState := 3; //ErrorStop_LM;
+	        
+	        (*State 16: Jogging +*)
+	    16: ;//Axis.AxisState := Jogging_LM;
+	        
+	        (*State 17: Jogging -*)
+	    17: ;//Axis.AxisState := Jogging_LM;
+	        
+	    ELSE
+	        #Error := FALSE;
+	        #ErrorID := 0;
+	END_CASE;
+	
+	
+	IF NOT #Enable THEN
+	    #Error := FALSE;
+	    #ErrorID := 0;
+	    #Busy := FALSE;
+	    #Status := FALSE;
+	END_IF;
+	
+	
+	(*=============================================================================
+	*  Calculate position(s) of axis
+	===============================================================================*) 
+	
+	IF #Axis.Config.IsRotaryMotor THEN // If axis is rotary /modulo 
+	    (*Calculate motor demand angle and number of revolutions*)
+	    #dMotorDemandAngle := #dMotorDemandAngle + (#Axis.DrvToPlc.ComDemandPosition - #dOldMotorDemandAngle);
+	    #dOldMotorDemandAngle := #Axis.DrvToPlc.ComDemandPosition;
+	    IF #dMotorDemandAngle < 0 THEN
+	        #dMotorDemandAngle := (#dMotorDemandAngle + #Axis.Config.ModuloFactor) MOD #Axis.Config.ModuloFactor;
+	        
+	    ELSIF #dMotorDemandAngle > #Axis.Config.ModuloFactor THEN
+	        #dMotorDemandAngle := (#dMotorDemandAngle - #Axis.Config.ModuloFactor) MOD #Axis.Config.ModuloFactor;
+	        
+	    ELSIF #dMotorDemandAngle = #Axis.Config.ModuloFactor THEN  //If the demand angle is exactly the modulo factor set demand angle to 0
+	        #dMotorDemandAngle := 0;
+	        
+	    END_IF;
+	    
+	    (*Calculate motor actual angle*)
+	    #dMotorActualAngle := #dMotorActualAngle + (#Axis.DrvToPlc.ComActualPosition - #dOldMotorActualAngle);
+	    #dOldMotorActualAngle := #Axis.DrvToPlc.ComActualPosition;
+	    
+	    IF #dMotorActualAngle < 0 THEN
+	        #dModN := (#dMotorActualAngle - (#dMotorActualAngle MOD #Axis.Config.ModuloFactor)) / #Axis.Config.ModuloFactor;
+	        #dMotorActualAngle := (#dMotorActualAngle + #Axis.Config.ModuloFactor) MOD #Axis.Config.ModuloFactor;
+	        IF #dModN = 0 THEN
+	            #Axis.Status.NrOfRevolutions := #Axis.Status.NrOfRevolutions - 1 + #dModN;
+	        ELSE
+	            #Axis.Status.NrOfRevolutions := #Axis.Status.NrOfRevolutions + #dModN;
+	        END_IF;
+	        
+	    ELSIF #dMotorActualAngle > #Axis.Config.ModuloFactor THEN
+	        #dModN := (#dMotorActualAngle - (#dMotorActualAngle MOD #Axis.Config.ModuloFactor)) / #Axis.Config.ModuloFactor;
+	        #dMotorActualAngle := (#dMotorActualAngle - #Axis.Config.ModuloFactor) MOD #Axis.Config.ModuloFactor;
+	        #Axis.Status.NrOfRevolutions := #Axis.Status.NrOfRevolutions + #dModN;
+	        
+	    ELSIF #dMotorActualAngle = #Axis.Config.ModuloFactor THEN  //If the actual angle is exactly the modulo factor set actual angle to 0
+	        #dMotorActualAngle := 0;
+	        #Axis.Status.NrOfRevolutions := #Axis.Status.NrOfRevolutions + 1;
+	    END_IF;
+	    
+	    // If the motor is homed recalculate the number of revolutions
+	    #rTrigHome(CLK := (#Axis.DrvToPlc.StateVar = 16#090F));
+	    IF #Axis.DrvToPlc.StateVar = 16#090F (*rTrigHome.Q*)THEN
+	        IF #Axis.Config.ModuloFactor > 0 THEN (*prevent division by 0*)
+	            #Axis.Status.NrOfRevolutions := (#Axis.DrvToPlc.ComDemandPosition - (#Axis.DrvToPlc.ComDemandPosition MOD #Axis.Config.ModuloFactor)) / #Axis.Config.ModuloFactor;
+	        ELSE
+	            #Axis.Status.NrOfRevolutions := 0;
+	        END_IF;
+	        
+	        #dMotorDemandAngle := #Axis.DrvToPlc.ComDemandPosition MOD #Axis.Config.ModuloFactor;
+	        #dMotorActualAngle := #dMotorDemandAngle - (#Axis.DrvToPlc.ComDemandPosition - #Axis.DrvToPlc.ComActualPosition); (*Istwinkel = Sollwinkel - Schleppfehler*)
+	        
+	        IF #dMotorActualAngle < 0 THEN
+	            #dMotorActualAngle := #dMotorActualAngle + #Axis.Config.ModuloFactor;
+	            #Axis.Status.NrOfRevolutions := #Axis.Status.NrOfRevolutions - 1;
+	        ELSIF #dMotorActualAngle > #Axis.Config.ModuloFactor THEN
+	            #dMotorActualAngle := #dMotorActualAngle - #Axis.Config.ModuloFactor;
+	            #Axis.Status.NrOfRevolutions := #Axis.Status.NrOfRevolutions + 1;
+	        END_IF;
+	        
+	        #dOldMotorActualAngle := #Axis.DrvToPlc.ComActualPosition;
+	        #dOldMotorDemandAngle := #Axis.DrvToPlc.ComDemandPosition;
+	    END_IF;
+	    
+	    #Axis.Status.ActualPosition := DINT_TO_LREAL(#dMotorActualAngle) / #Axis.Config.UnitScale;
+	    #Axis.Status.DemandPosition := DINT_TO_LREAL(#dMotorDemandAngle) / #Axis.Config.UnitScale;
+	    
+	ELSE // If axis is linear
+	    #Axis.Status.ActualPosition := DINT_TO_LREAL(#Axis.DrvToPlc.ComActualPosition) / #Axis.Config.UnitScale;
+	    #Axis.Status.DemandPosition := DINT_TO_LREAL(#Axis.DrvToPlc.ComDemandPosition) / #Axis.Config.UnitScale;
+	    
+	END_IF;
+	
+	(*=============================================================================
+	* Config Channel WatchDog
+	===============================================================================*) 
+	
+	IF #Axis.ConfigChannelBusy OR (#Axis.PlcToDrv.CfgControlWord <> 0) THEN
+	    IF (#Axis.PlcToDrv.CfgControlWord = 16#3000) // Reboot
+	        OR (#Axis.PlcToDrv.CfgControlWord = 16#4001) // Flash CT
+	        OR (#Axis.PlcToDrv.CfgControlWord = 16#8001) // Flash Curves
+	        OR (#Axis.PlcToDrv.CfgControlWord = 16#0001) // Polling
+	    THEN
+	        #TON_WD(IN := TRUE,
+	                PT := T#180s); // Flash command (must be higher than the highest timeout in LMcf_... function blocks)
+	    ELSE
+	        #TON_WD(IN := TRUE,
+	                PT := T#5s); // No flash command
+	    END_IF;
+	END_IF;
+	
+	IF NOT (#uiCfgRWLastCmd = #Axis.PlcToDrv.CfgControlWord) OR NOT #Axis.ConfigChannelBusy THEN
+	    #TON_WD(IN := FALSE,
+	            PT := T#10s); // Reset Timer
+	END_IF;
+	#uiCfgRWLastCmd := #Axis.PlcToDrv.CfgControlWord;
+	
+	IF #TON_WD.Q THEN
+	    #Axis.PlcToDrv.CfgControlWord := 0; // Reset config command
+	END_IF;
+	
+	(*=============================================================================
+	* End
+	===============================================================================*) 
+	
+END_FUNCTION_BLOCK
+
