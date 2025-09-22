@@ -1,0 +1,657 @@
+FUNCTION_BLOCK "FB_LinMot_Clean"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      i_Freigabe : Bool;   // Allgemeine Freigabe
+      i_FreigabeSoft : Bool;   // Software-Freigabe für Bewegungen
+      ip_Maschine : Word;   // Maschinennummer für Alarmsystem
+      ip_Station : Word;   // Stationsnummer für Alarmsystem
+      ip_Bmk : Word;   // BMK für Alarmsystem
+      i_ACK : Bool;   // Quittierung für Störungen
+      ST_LinMotDrvToPlc : "ST_LinMotDrvToPlc";   // Daten vom Drive zur SPS
+   END_VAR
+
+   VAR_OUTPUT 
+      ST_LinMotPlcToDrv : "ST_LinMotPlcToDrv";   // Daten von SPS zum Drive
+   END_VAR
+
+   VAR_IN_OUT 
+      iq_Stoermeldeindikator : Bool;   // Störmeldeindikator
+      iq_LinMot_HMI : "ST_LinMot_Advanced_HMI";   // HMI-Schnittstelle
+   END_VAR
+
+   VAR 
+      // Interne Axis-Struktur
+      Axis : Struct
+         PlcToDrv : Struct
+            ControlWord : Word;
+            MCHeader : Word;
+            MCParaWord0 : Word;
+            MCParaWord1 : Word;
+            MCParaWord2 : Word;
+            MCParaWord3 : Word;
+            MCParaWord4 : Word;
+            MCParaWord5 : Word;
+            MCParaWord6 : Word;
+            MCParaWord7 : Word;
+            MCParaWord8 : Word;
+            MCParaWord9 : Word;
+            CfgControlWord : Word;
+            CfgIndexOut : Word;
+            CfgValueOut : DWord;
+         END_STRUCT;
+         DrvToPlc : Struct
+            StateVar : Word;
+            StatusWord : Word;
+            WarnWord : Word;
+            ComDemandPosition : DInt;
+            ComActualPosition : DInt;
+            ComActualCurrent32 : DInt;
+            ComActualCurrent16 : Int;
+            CfgStatusWord : Word;
+            CfgIndexIn : Word;
+            CfgValueIn : DWord;
+         END_STRUCT;
+         CommandRunning : Bool;
+         CommandAborted : Bool;
+         ConfigChannelBusy : Bool;
+      END_STRUCT;
+      
+      // State Variables
+      uiState : UInt;   // Haupt-Zustandsvariable
+      uiFbState : UInt;   // State Machine für Move-Funktionalität
+      
+      // Command Handling
+      usiOldCmdCount : USInt;
+      usiNewCmdCount : USInt;
+      uiCmdHeader : UInt;
+      uiCmdHeaderM0 : UInt := 16#0110;   // Home Command Header
+      uiCmdHeaderM4 : UInt := 16#0170;   // Move Absolute Command Header
+      udiTmpDWord : UDInt;
+      
+      // Position Calculation
+      dMotorDemandAngle : DInt;
+      dOldMotorDemandAngle : DInt;
+      dMotorActualAngle : DInt;
+      dOldMotorActualAngle : DInt;
+      dModN : DInt;
+      
+      // Trigger Detection
+      bRTrig : Bool;
+      bFlagExecute : Bool;
+      bRTrigHome : Bool;
+      bRFlagHome : Bool;
+      bFTrigHome : Bool;
+      bFFlagHome : Bool;
+      rTrigHome : R_TRIG;
+      
+      // Timing
+      TON_WD : TON;
+      dCmdWD : DInt;
+      
+      // Configuration Watchdog
+      uiCfgRWLastCmd : UInt;
+      
+      // Flag Handling
+      FP1 : Bool;
+      FP2 : Bool;
+      
+      // Error Handling
+      int_Meldungsnummer : Int;
+      iDB_BasisMappingProgramAlarm : "FB_BasisMappingProgramAlarm";
+      iDB_BasisMappingProgramAlarm_1 : "FB_BasisMappingProgramAlarm";
+      Meldungen_LinMot : Array[0..100] of "ST_ProgramAlarm";
+      Meldung_ApplikationLinMot : Array[0..100] of "ST_ProgramAlarm";
+   END_VAR
+
+
+BEGIN
+	(********************************************************************************
+	version |   Datum   | Autor       | Kommentar
+	--------|-----------|-------------|-----------------------------------------------------
+	v0.1    |19.05.2025 | w011247@WI  | Sauber strukturierte Version basierend auf FB_LMEpos_ehem.scl
+	--------|-----------|-------------|-----------------------------------------------------
+	
+	--- Kurzbeschreibung ---
+	Sauber strukturierter LinMot Funktionsbaustein zur Einachspositionierung mit
+	REGION-basierter Architektur nach Template-Vorgaben.
+	Unterstützt Home, Power, Reset, MoveAbs Funktionen mit professioneller
+	Fehlerbehandlung über Program_Alarm Integration.
+	
+	--- Abhängig von ---
+	- ST_LinMotDrvToPlc
+	- ST_LinMotPlcToDrv  
+	- ST_LinMot_Advanced_HMI
+	- FB_BasisMappingProgramAlarm
+	
+	--- Alarmbeschreibung ---
+	Verwendet Program_Alarm System für professionelle Fehlerbehandlung
+	********************************************************************************)
+
+	#REGION DATA_EXCHANGE
+		// LinMot Daten einlesen - Mapping der Word Arrays zu strukturierten Daten
+		#Axis.DrvToPlc.StateVar := #ST_LinMotDrvToPlc."DrvToPlc[0]";
+		#Axis.DrvToPlc.StatusWord := #ST_LinMotDrvToPlc."DrvToPlc[1]";
+		#Axis.DrvToPlc.WarnWord := #ST_LinMotDrvToPlc."DrvToPlc[2]";
+		#Axis.DrvToPlc.ComDemandPosition := DWORD_TO_DINT(ROR(IN := WORD_TO_DWORD(#ST_LinMotDrvToPlc."DrvToPlc[4]"), N := 16) + WORD_TO_DWORD(#ST_LinMotDrvToPlc."DrvToPlc[3]"));
+		#Axis.DrvToPlc.ComActualPosition := DWORD_TO_DINT(ROR(IN := WORD_TO_DWORD(#ST_LinMotDrvToPlc."DrvToPlc[6]"), N := 16) + WORD_TO_DWORD(#ST_LinMotDrvToPlc."DrvToPlc[5]"));
+		#Axis.DrvToPlc.ComActualCurrent32 := DWORD_TO_DINT(ROR(IN := WORD_TO_DWORD(#ST_LinMotDrvToPlc."DrvToPlc[8]"), N := 16) + WORD_TO_DWORD(#ST_LinMotDrvToPlc."DrvToPlc[7]"));
+		
+		// Config Channel Inputs
+		#Axis.DrvToPlc.CfgStatusWord := #ST_LinMotDrvToPlc."DrvToPlc[9]";
+		#Axis.DrvToPlc.CfgIndexIn := #ST_LinMotDrvToPlc."DrvToPlc[10]";
+		#Axis.DrvToPlc.CfgValueIn := ROR(IN := WORD_TO_DWORD(#ST_LinMotDrvToPlc."DrvToPlc[12]"), N := 16) + WORD_TO_DWORD(#ST_LinMotDrvToPlc."DrvToPlc[11]");
+		
+		// Status Variablen extrahieren
+		#uiState := SHR(IN := #Axis.DrvToPlc.StateVar, N := 8);
+	#END_REGION
+	
+	#REGION CONFIGURATION
+		// Axis Konfiguration validieren und korrigieren
+		IF #iq_LinMot_HMI.Config.ForceScale <= 0 THEN
+		    #iq_LinMot_HMI.Config.ForceScale := 0.1;
+		END_IF;
+		
+		IF #iq_LinMot_HMI.Config.TorqueForceScale <= 0 THEN
+		    #iq_LinMot_HMI.Config.TorqueForceScale := 0.00057295779513082;
+		END_IF;
+		
+		IF #iq_LinMot_HMI.Config.ModuloFactor <= 0 THEN
+		    #iq_LinMot_HMI.Config.ModuloFactor := 360000;
+		END_IF;
+		
+		IF #iq_LinMot_HMI.Config.PosScaleNumerator <= 0 THEN
+		    #iq_LinMot_HMI.Config.PosScaleNumerator := 10000;
+		END_IF;
+		
+		IF #iq_LinMot_HMI.Config.PosScaleDenominator <= 0 THEN
+		    #iq_LinMot_HMI.Config.PosScaleDenominator := 1;
+		END_IF;
+		
+		#iq_LinMot_HMI.Config.UnitScale := #iq_LinMot_HMI.Config.PosScaleNumerator / #iq_LinMot_HMI.Config.PosScaleDenominator;
+		
+		// Strom Auswertung (16Bit/32Bit Workaround)
+		IF #Axis.DrvToPlc.ComActualCurrent32 = 0 AND #Axis.DrvToPlc.ComActualCurrent16 = 0 THEN
+		    #iq_LinMot_HMI.Status.ActualCurrent := 0;
+		ELSIF #Axis.DrvToPlc.ComActualCurrent32 <> 0 AND #Axis.DrvToPlc.ComActualCurrent16 = 0 THEN
+		    #iq_LinMot_HMI.Status.ActualCurrent := DINT_TO_LREAL(#Axis.DrvToPlc.ComActualCurrent32) / 1000;
+		ELSIF #Axis.DrvToPlc.ComActualCurrent32 = 0 AND #Axis.DrvToPlc.ComActualCurrent16 <> 0 THEN
+		    #iq_LinMot_HMI.Status.ActualCurrent := INT_TO_LREAL(#Axis.DrvToPlc.ComActualCurrent16) / 1000;
+		ELSE
+		    #iq_LinMot_HMI.Status.ActualCurrent := DINT_TO_LREAL(#Axis.DrvToPlc.ComActualCurrent32) / 1000;
+		END_IF;
+	#END_REGION
+	
+	#REGION POWER_ON
+		// Status Variablen aktualisieren
+		#iq_LinMot_HMI.Status.OperationEnabled := #Axis.DrvToPlc.StatusWord.%X0;
+		#iq_LinMot_HMI.Status.SwitchOnLocked := #Axis.DrvToPlc.StatusWord.%X6;
+		#iq_LinMot_HMI.Status.Warning := #Axis.DrvToPlc.StatusWord.%X7;
+		#iq_LinMot_HMI.Status.Homed := #Axis.DrvToPlc.StatusWord.%X11;
+		#iq_LinMot_HMI.Status.MotionActive := #Axis.DrvToPlc.StatusWord.%X13;
+		
+		// Force ControlWord Bits (Support for -MI Drives)
+		#Axis.PlcToDrv.ControlWord.%X2 := TRUE; // /Quick Stop
+		#Axis.PlcToDrv.ControlWord.%X3 := TRUE; // Enable Operation
+		#Axis.PlcToDrv.ControlWord.%X4 := TRUE; // /Abort
+		#Axis.PlcToDrv.ControlWord.%X5 := TRUE; // /Freeze
+		
+		// Switch On Logic
+		IF NOT #i_Freigabe OR #iq_LinMot_HMI.Status.SwitchOnLocked THEN
+		    #Axis.PlcToDrv.ControlWord.%X0 := FALSE;
+		ELSIF #i_Freigabe THEN
+		    #Axis.PlcToDrv.ControlWord.%X0 := TRUE;
+		END_IF;
+		
+		// LinMot einschalten
+		IF #i_Freigabe = TRUE AND #iq_LinMot_HMI.ErrorAcknowledge = FALSE THEN
+		    #iq_LinMot_HMI.SwitchOn := TRUE;
+		ELSE
+		    #iq_LinMot_HMI.SwitchOn := FALSE;
+		END_IF;
+		
+		// State Machine für Power-On States
+		CASE #uiState OF
+		    00, 01, 02: // Not Ready to Switch On, Ready to Switch On
+		        #iq_LinMot_HMI.AxisState := 1; // Disabled_LM
+		        
+		    03: // Setup Error State
+		        #iq_LinMot_HMI.AxisState := 3; // ErrorStop_LM
+		        
+		    05: // HW Test
+		        #iq_LinMot_HMI.AxisState := 1; // Disabled_LM
+		        
+		    06: // Ready to Operate
+		        #iq_LinMot_HMI.AxisState := 1; // Disabled_LM
+		        
+		    07: // Brake Release
+		        #iq_LinMot_HMI.AxisState := 1; // Disabled_LM
+		        
+		    08: // Operation Enabled
+		        IF NOT #Axis.DrvToPlc.StatusWord.%X13
+		            AND ((#Axis.PlcToDrv.MCHeader AND 16#FFF0) = 16#0000)
+		            AND NOT (#iq_LinMot_HMI.AxisState = 5) // Homing_LM
+		            AND NOT (#iq_LinMot_HMI.AxisState = 4) // Stopping_LM
+		        THEN
+		            #iq_LinMot_HMI.AxisState := 2; // StandStill_LM
+		        END_IF;
+		        
+		        // Command Watchdog
+		        IF NOT #Axis.DrvToPlc.StatusWord.%X13
+		            AND NOT ((#Axis.PlcToDrv.MCHeader AND 16#FFF0) = 16#0000)
+		            AND NOT (#iq_LinMot_HMI.AxisState = 5) // Homing_LM
+		            AND NOT (#iq_LinMot_HMI.AxisState = 4) // Stopping_LM
+		        THEN
+		            #dCmdWD := #dCmdWD + 1;
+		        ELSE
+		            #dCmdWD := 0;
+		        END_IF;
+		END_CASE;
+		
+		// Reset Header wenn nicht in Operation Enabled
+		IF #uiState <> 16#08 THEN
+		    #Axis.PlcToDrv.MCHeader := 16#0000;
+		    #Axis.CommandAborted := FALSE;
+		    #Axis.CommandRunning := FALSE;
+		END_IF;
+		
+		// Error State zurücksetzen wenn keine Freigabe
+		IF NOT #i_Freigabe THEN
+		    #iq_LinMot_HMI.Status.Error := FALSE;
+		    #iq_LinMot_HMI.Status.ErrorCode := 0;
+		END_IF;
+	#END_REGION
+	
+	#REGION HOME
+		// Home Trigger Detection
+		#bRTrigHome := #iq_LinMot_HMI.Home AND NOT #bRFlagHome;
+		#bRFlagHome := #iq_LinMot_HMI.Home;
+		
+		#bFTrigHome := NOT #iq_LinMot_HMI.Home AND #bFFlagHome;
+		#bFFlagHome := #iq_LinMot_HMI.Home;
+		
+		// Home Command senden
+		IF #bRTrigHome THEN
+		    #Axis.PlcToDrv.ControlWord.%X11 := TRUE;
+		END_IF;
+		IF #bFTrigHome THEN
+		    #Axis.PlcToDrv.ControlWord.%X11 := FALSE;
+		END_IF;
+		
+		// Home Status Management
+		IF #uiState = 16#09 OR (#Axis.PlcToDrv.ControlWord.%X11 AND NOT (#uiState = 16#09)) THEN
+		    #iq_LinMot_HMI.Status.Homed := FALSE;
+		    #iq_LinMot_HMI.AxisState := 5; // Homing_LM
+		ELSE
+		    #iq_LinMot_HMI.Status.Homed := #Axis.DrvToPlc.StatusWord.%X11;
+		END_IF;
+		
+		// Home zurücksetzen wenn keine Freigabe
+		IF #i_Freigabe = FALSE THEN
+		    #iq_LinMot_HMI.Home := FALSE;
+		END_IF;
+		
+		// Trigger für Home-Abschluss
+		#rTrigHome(CLK := (#Axis.DrvToPlc.StateVar = 16#090F));
+		IF #Axis.DrvToPlc.StateVar = 16#090F THEN
+		    // Recalculate position after homing für Rotary Motor
+		    IF #iq_LinMot_HMI.Config.IsRotaryMotor THEN
+		        IF #iq_LinMot_HMI.Config.ModuloFactor > 0 THEN
+		            #iq_LinMot_HMI.Status.NrOfRevolutions := (#Axis.DrvToPlc.ComDemandPosition - (#Axis.DrvToPlc.ComDemandPosition MOD #iq_LinMot_HMI.Config.ModuloFactor)) / #iq_LinMot_HMI.Config.ModuloFactor;
+		        ELSE
+		            #iq_LinMot_HMI.Status.NrOfRevolutions := 0;
+		        END_IF;
+		        
+		        #dMotorDemandAngle := #Axis.DrvToPlc.ComDemandPosition MOD #iq_LinMot_HMI.Config.ModuloFactor;
+		        #dMotorActualAngle := #dMotorDemandAngle - (#Axis.DrvToPlc.ComDemandPosition - #Axis.DrvToPlc.ComActualPosition);
+		        
+		        IF #dMotorActualAngle < 0 THEN
+		            #dMotorActualAngle := #dMotorActualAngle + #iq_LinMot_HMI.Config.ModuloFactor;
+		            #iq_LinMot_HMI.Status.NrOfRevolutions := #iq_LinMot_HMI.Status.NrOfRevolutions - 1;
+		        ELSIF #dMotorActualAngle > #iq_LinMot_HMI.Config.ModuloFactor THEN
+		            #dMotorActualAngle := #dMotorActualAngle - #iq_LinMot_HMI.Config.ModuloFactor;
+		            #iq_LinMot_HMI.Status.NrOfRevolutions := #iq_LinMot_HMI.Status.NrOfRevolutions + 1;
+		        END_IF;
+		        
+		        #dOldMotorActualAngle := #Axis.DrvToPlc.ComActualPosition;
+		        #dOldMotorDemandAngle := #Axis.DrvToPlc.ComDemandPosition;
+		    END_IF;
+		END_IF;
+	#END_REGION
+	
+	#REGION RESET
+		// LinMot Störung quittieren
+		IF #i_ACK = TRUE AND #iq_LinMot_HMI.Status.Error = TRUE THEN
+		    #iq_LinMot_HMI.ErrorAcknowledge := TRUE;
+		    #iq_Stoermeldeindikator := FALSE;
+		    #int_Meldungsnummer := 0;
+		ELSE
+		    #iq_LinMot_HMI.ErrorAcknowledge := FALSE;
+		END_IF;
+		
+		// Error acknowledge zum Drive
+		#Axis.PlcToDrv.ControlWord.%X7 := #iq_LinMot_HMI.ErrorAcknowledge;
+		
+		// Execute zurücksetzen bei verschiedenen Bedingungen
+		IF #i_Freigabe = FALSE OR #i_FreigabeSoft = FALSE OR #iq_LinMot_HMI.Status.Homed = FALSE THEN
+		    #iq_LinMot_HMI.Execute := FALSE;
+		END_IF;
+		
+		// Auto-Reset Execute nach Done
+		IF #iq_LinMot_HMI.Status.Done = TRUE AND #FP1 = FALSE THEN
+		    #iq_LinMot_HMI.Execute := FALSE;
+		    #FP1 := TRUE;
+		ELSE
+		    #FP1 := FALSE;
+		END_IF;
+		
+		// Auto-Reset Execute nach Error
+		IF #iq_LinMot_HMI.Status.Error = TRUE AND #FP2 = FALSE THEN
+		    #iq_LinMot_HMI.Execute := FALSE;
+		    #FP2 := TRUE;
+		ELSE
+		    #FP2 := FALSE;
+		END_IF;
+	#END_REGION
+	
+	#REGION MOVE
+		// Position Calculation
+		IF #iq_LinMot_HMI.Config.IsRotaryMotor THEN // Rotary Motor
+		    // Calculate motor demand angle and number of revolutions
+		    #dMotorDemandAngle := #dMotorDemandAngle + (#Axis.DrvToPlc.ComDemandPosition - #dOldMotorDemandAngle);
+		    #dOldMotorDemandAngle := #Axis.DrvToPlc.ComDemandPosition;
+		    
+		    // Modulo calculation for demand angle
+		    IF #dMotorDemandAngle < 0 THEN
+		        #dMotorDemandAngle := (#dMotorDemandAngle + #iq_LinMot_HMI.Config.ModuloFactor) MOD #iq_LinMot_HMI.Config.ModuloFactor;
+		    ELSIF #dMotorDemandAngle > #iq_LinMot_HMI.Config.ModuloFactor THEN
+		        #dMotorDemandAngle := (#dMotorDemandAngle - #iq_LinMot_HMI.Config.ModuloFactor) MOD #iq_LinMot_HMI.Config.ModuloFactor;
+		    ELSIF #dMotorDemandAngle = #iq_LinMot_HMI.Config.ModuloFactor THEN
+		        #dMotorDemandAngle := 0;
+		    END_IF;
+		    
+		    // Calculate motor actual angle
+		    #dMotorActualAngle := #dMotorActualAngle + (#Axis.DrvToPlc.ComActualPosition - #dOldMotorActualAngle);
+		    #dOldMotorActualAngle := #Axis.DrvToPlc.ComActualPosition;
+		    
+		    // Modulo calculation for actual angle
+		    IF #dMotorActualAngle < 0 THEN
+		        #dModN := (#dMotorActualAngle - (#dMotorActualAngle MOD #iq_LinMot_HMI.Config.ModuloFactor)) / #iq_LinMot_HMI.Config.ModuloFactor;
+		        #dMotorActualAngle := (#dMotorActualAngle + #iq_LinMot_HMI.Config.ModuloFactor) MOD #iq_LinMot_HMI.Config.ModuloFactor;
+		        IF #dModN = 0 THEN
+		            #iq_LinMot_HMI.Status.NrOfRevolutions := #iq_LinMot_HMI.Status.NrOfRevolutions - 1 + #dModN;
+		        ELSE
+		            #iq_LinMot_HMI.Status.NrOfRevolutions := #iq_LinMot_HMI.Status.NrOfRevolutions + #dModN;
+		        END_IF;
+		    ELSIF #dMotorActualAngle > #iq_LinMot_HMI.Config.ModuloFactor THEN
+		        #dModN := (#dMotorActualAngle - (#dMotorActualAngle MOD #iq_LinMot_HMI.Config.ModuloFactor)) / #iq_LinMot_HMI.Config.ModuloFactor;
+		        #dMotorActualAngle := (#dMotorActualAngle - #iq_LinMot_HMI.Config.ModuloFactor) MOD #iq_LinMot_HMI.Config.ModuloFactor;
+		        #iq_LinMot_HMI.Status.NrOfRevolutions := #iq_LinMot_HMI.Status.NrOfRevolutions + #dModN;
+		    ELSIF #dMotorActualAngle = #iq_LinMot_HMI.Config.ModuloFactor THEN
+		        #dMotorActualAngle := 0;
+		        #iq_LinMot_HMI.Status.NrOfRevolutions := #iq_LinMot_HMI.Status.NrOfRevolutions + 1;
+		    END_IF;
+		    
+		    #iq_LinMot_HMI.Status.ActualPosition := DINT_TO_LREAL(#dMotorActualAngle) / #iq_LinMot_HMI.Config.UnitScale;
+		    #iq_LinMot_HMI.Status.DemandPosition := DINT_TO_LREAL(#dMotorDemandAngle) / #iq_LinMot_HMI.Config.UnitScale;
+		    
+		ELSE // Linear Motor
+		    #iq_LinMot_HMI.Status.ActualPosition := DINT_TO_LREAL(#Axis.DrvToPlc.ComActualPosition) / #iq_LinMot_HMI.Config.UnitScale;
+		    #iq_LinMot_HMI.Status.DemandPosition := DINT_TO_LREAL(#Axis.DrvToPlc.ComDemandPosition) / #iq_LinMot_HMI.Config.UnitScale;
+		END_IF;
+		
+		// MoveAbsolute State Machine
+		#usiOldCmdCount := DWORD_TO_USINT(SHR(IN := UINT_TO_USINT(SHL(IN := #Axis.DrvToPlc.StateVar, N := 4)), N := 4));
+		
+		// Execute Edge Detection
+		#bRTrig := #iq_LinMot_HMI.Execute AND #i_FreigabeSoft AND #iq_LinMot_HMI.Status.Homed AND NOT #bFlagExecute;
+		#bFlagExecute := #iq_LinMot_HMI.Execute;
+		
+		// Start Move Command
+		IF #bRTrig AND #uiState = 16#08 AND NOT #Axis.CommandRunning AND NOT #Axis.DrvToPlc.StatusWord.%X13 THEN
+		    IF #uiState = 16#08 THEN
+		        #iq_LinMot_HMI.Status.Busy := TRUE;
+		        IF #iq_LinMot_HMI.Config.IsRotaryMotor THEN
+		            #uiFbState := 1; // Send command rotary
+		        ELSE
+		            #uiFbState := 2; // Send command linear
+		        END_IF;
+		    END_IF;
+		    
+		    // Check if axis is ready
+		    IF #uiState <> 16#08 OR (#iq_LinMot_HMI.AxisState = 4) THEN
+		        #uiFbState := 50; // Error state
+		        #iq_LinMot_HMI.Status.Error := TRUE;
+		        IF #uiState = 16#04 THEN
+		            #iq_LinMot_HMI.Status.ErrorCode := 16#03; // Axis has error
+		        ELSE
+		            #iq_LinMot_HMI.Status.ErrorCode := 16#01; // Axis not ready
+		        END_IF;
+		    END_IF;
+		END_IF;
+		
+		// Move State Machine
+		CASE #uiFbState OF
+		    0: // Idle
+		        ;
+		        
+		    1: // Rotary Motor: Validate inputs and send command
+		        IF (0 <= #iq_LinMot_HMI.Position AND #iq_LinMot_HMI.Position * #iq_LinMot_HMI.Config.UnitScale <= #iq_LinMot_HMI.Config.ModuloFactor)
+		            AND (0 < #iq_LinMot_HMI.Velocity AND #iq_LinMot_HMI.Velocity * #iq_LinMot_HMI.Config.UnitScale <= 42949672950.0)
+		            AND (0 < #iq_LinMot_HMI.Acceleration AND #iq_LinMot_HMI.Acceleration * #iq_LinMot_HMI.Config.UnitScale <= 429496729500.0)
+		            AND (0 < #iq_LinMot_HMI.Deceleration AND #iq_LinMot_HMI.Deceleration * #iq_LinMot_HMI.Config.UnitScale <= 429496729500.0)
+		            AND #iq_LinMot_HMI.Config.ModuloFactor > 0
+		        THEN
+		            #iq_LinMot_HMI.AxisState := 6; // DiscreteMotion_LM
+		            
+		            // Calculate command header with CMD Count
+		            #usiNewCmdCount := (#usiOldCmdCount + 1) MOD 16;
+		            #Axis.PlcToDrv.MCHeader := 16#0000;
+		            #uiCmdHeader := #uiCmdHeaderM0;
+		            #Axis.PlcToDrv.MCHeader := #uiCmdHeader + #usiNewCmdCount;
+		            
+		            // Send parameters
+		            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#iq_LinMot_HMI.Position * #iq_LinMot_HMI.Config.UnitScale));
+		            #Axis.PlcToDrv.MCParaWord0 := UDINT_TO_UINT(#udiTmpDWord);
+		            #Axis.PlcToDrv.MCParaWord1 := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+		            
+		            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#iq_LinMot_HMI.Velocity * #iq_LinMot_HMI.Config.UnitScale / 10));
+		            #Axis.PlcToDrv.MCParaWord2 := UDINT_TO_UINT(#udiTmpDWord);
+		            #Axis.PlcToDrv.MCParaWord3 := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+		            
+		            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#iq_LinMot_HMI.Acceleration * #iq_LinMot_HMI.Config.UnitScale / 100));
+		            #Axis.PlcToDrv.MCParaWord4 := UDINT_TO_UINT(#udiTmpDWord);
+		            #Axis.PlcToDrv.MCParaWord5 := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+		            
+		            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#iq_LinMot_HMI.Deceleration * #iq_LinMot_HMI.Config.UnitScale / 100));
+		            #Axis.PlcToDrv.MCParaWord6 := UDINT_TO_UINT(#udiTmpDWord);
+		            #Axis.PlcToDrv.MCParaWord7 := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+		            
+		            #uiFbState := 3; // Check done
+		        ELSE
+		            #uiFbState := 50; // Error state
+		            #iq_LinMot_HMI.Status.Error := TRUE;
+		            #iq_LinMot_HMI.Status.ErrorCode := 16#06; // Invalid input(s)
+		        END_IF;
+		        
+		    2: // Linear motor: Validate inputs and send command
+		        IF (#iq_LinMot_HMI.Position * #iq_LinMot_HMI.Config.UnitScale) >= -2147483648.0
+		            AND (#iq_LinMot_HMI.Position * #iq_LinMot_HMI.Config.UnitScale) <= 2147483647.0
+		            AND (0 < #iq_LinMot_HMI.Velocity AND #iq_LinMot_HMI.Velocity * #iq_LinMot_HMI.Config.UnitScale <= 42949672950.0)
+		            AND (0 < #iq_LinMot_HMI.Acceleration AND #iq_LinMot_HMI.Acceleration * #iq_LinMot_HMI.Config.UnitScale <= 429496729500.0)
+		            AND (0 < #iq_LinMot_HMI.Deceleration AND #iq_LinMot_HMI.Deceleration * #iq_LinMot_HMI.Config.UnitScale <= 429496729500.0)
+		        THEN
+		            #iq_LinMot_HMI.AxisState := 6; // DiscreteMotion_LM
+		            
+		            // Calculate command header with CMD Count
+		            #usiNewCmdCount := (#usiOldCmdCount + 1) MOD 16;
+		            #Axis.PlcToDrv.MCHeader := 16#0000;
+		            #uiCmdHeader := #uiCmdHeaderM4;
+		            #Axis.PlcToDrv.MCHeader := #uiCmdHeaderM4 + #usiNewCmdCount;
+		            
+		            // Send parameters
+		            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#iq_LinMot_HMI.Position * #iq_LinMot_HMI.Config.UnitScale));
+		            #Axis.PlcToDrv.MCParaWord0 := UDINT_TO_UINT(#udiTmpDWord);
+		            #Axis.PlcToDrv.MCParaWord1 := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+		            
+		            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#iq_LinMot_HMI.Velocity * #iq_LinMot_HMI.Config.UnitScale / 10));
+		            #Axis.PlcToDrv.MCParaWord2 := UDINT_TO_UINT(#udiTmpDWord);
+		            #Axis.PlcToDrv.MCParaWord3 := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+		            
+		            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#iq_LinMot_HMI.Acceleration * #iq_LinMot_HMI.Config.UnitScale / 100));
+		            #Axis.PlcToDrv.MCParaWord4 := UDINT_TO_UINT(#udiTmpDWord);
+		            #Axis.PlcToDrv.MCParaWord5 := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+		            
+		            #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#iq_LinMot_HMI.Deceleration * #iq_LinMot_HMI.Config.UnitScale / 100));
+		            #Axis.PlcToDrv.MCParaWord6 := UDINT_TO_UINT(#udiTmpDWord);
+		            #Axis.PlcToDrv.MCParaWord7 := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+		            
+		            #uiFbState := 3; // Check done
+		        ELSE
+		            #uiFbState := 50; // Error state
+		            #iq_LinMot_HMI.Status.Error := TRUE;
+		            #iq_LinMot_HMI.Status.ErrorCode := 16#06; // Invalid input(s)
+		        END_IF;
+		        
+		    3: // Check if command has been executed
+		        IF #usiOldCmdCount = #usiNewCmdCount AND #uiState = 16#08 AND #Axis.DrvToPlc.StateVar.%X6 THEN
+		            #iq_LinMot_HMI.Status.Done := TRUE;
+		            #iq_LinMot_HMI.Status.Busy := FALSE;
+		            #Axis.PlcToDrv.MCHeader := 16#0000 + #usiNewCmdCount; // Send no operation
+		            #iq_LinMot_HMI.AxisState := 2; // Standstill_LM
+		            #uiFbState := 4;
+		        END_IF;
+		        
+		    4: // Wait for Execute reset
+		        IF NOT #iq_LinMot_HMI.Execute THEN
+		            #uiFbState := 0;
+		            #iq_LinMot_HMI.Status.Busy := FALSE;
+		            #iq_LinMot_HMI.Status.Done := FALSE;
+		        END_IF;
+		        
+		    50: // Error state
+		        #iq_LinMot_HMI.Status.Error := TRUE;
+		        #iq_LinMot_HMI.Status.Busy := FALSE;
+		        #iq_LinMot_HMI.Status.Done := FALSE;
+		        IF NOT #iq_LinMot_HMI.Execute THEN
+		            #uiFbState := 0;
+		            #iq_LinMot_HMI.Status.Error := FALSE;
+		            #iq_LinMot_HMI.Status.ErrorCode := 0;
+		        END_IF;
+		END_CASE;
+		
+		// Jog Functions
+		#Axis.PlcToDrv.ControlWord.%X8 := #iq_LinMot_HMI.JogPlus;
+		#Axis.PlcToDrv.ControlWord.%X9 := #iq_LinMot_HMI.JogMinus;
+		
+		IF (#uiState = 16 OR #uiState = 17) AND UINT_TO_USINT(#Axis.DrvToPlc.StateVar) = 16#01 THEN
+		    #iq_LinMot_HMI.Status.Jogging := TRUE;
+		ELSE
+		    #iq_LinMot_HMI.Status.Jogging := FALSE;
+		END_IF;
+		
+		// Application-specific error checks
+		IF #iq_LinMot_HMI.Status.Busy AND NOT #i_FreigabeSoft THEN
+		    #int_Meldungsnummer := 1; // Keine Freigabe aus i_FreigabeSoft
+		END_IF;
+		
+		IF #iq_LinMot_HMI.Status.Homed = FALSE THEN
+		    #int_Meldungsnummer := 2; // Achse nicht referenziert
+		END_IF;
+	#END_REGION
+	
+	#REGION ERROR_HANDLING
+		// Drive Error States
+		CASE #uiState OF
+		    04: // Error
+		        #iq_LinMot_HMI.Status.ErrorCode := UINT_TO_USINT(#Axis.DrvToPlc.StateVar);
+		        #iq_LinMot_HMI.Status.Error := TRUE;
+		        #iq_Stoermeldeindikator := TRUE;
+		        #iq_LinMot_HMI.AxisState := 3; // ErrorStop_LM
+		        
+		    14: // Error Behaviour QuickStop
+		        #iq_LinMot_HMI.AxisState := 3; // ErrorStop_LM
+		END_CASE;
+		
+		// Error zurücksetzen wenn nicht in Error State
+		IF #uiState <> 16#04 THEN
+		    #iq_LinMot_HMI.Status.Error := FALSE;
+		    #iq_LinMot_HMI.Status.ErrorCode := 16#00;
+		END_IF;
+		
+		// Error Code Management
+		IF #iq_LinMot_HMI.Status.Error THEN
+		    #iq_LinMot_HMI.Status.ErrorCode := #Axis.DrvToPlc.StateVar AND 16#00FF;
+		ELSE
+		    #iq_LinMot_HMI.Status.ErrorCode := 0;
+		END_IF;
+		
+		// Program_Alarm Integration
+		#iDB_BasisMappingProgramAlarm(i_Signal := #iq_LinMot_HMI.Status.Error,
+		                              i_Maschine := #ip_Maschine,
+		                              i_Station := #ip_Station,
+		                              i_Bmk := #ip_Bmk,
+		                              i_FehlernummerObjekt := WORD_TO_INT(#Axis.DrvToPlc.StateVar),
+		                              iq_Meldung := #Meldungen_LinMot);
+		
+		#iDB_BasisMappingProgramAlarm_1(i_Signal := #int_Meldungsnummer <> 0,
+		                                i_Maschine := #ip_Maschine,
+		                                i_Station := #ip_Station,
+		                                i_Bmk := #ip_Bmk,
+		                                i_FehlernummerObjekt := #int_Meldungsnummer,
+		                                iq_Meldung := #Meldung_ApplikationLinMot);
+		
+		// Störmeldeindikator Management
+		IF #iDB_BasisMappingProgramAlarm.q_Stoerung OR #iDB_BasisMappingProgramAlarm_1.q_Stoerung THEN
+		    #iq_Stoermeldeindikator := TRUE;
+		    #iq_LinMot_HMI.Status.Error := TRUE;
+		END_IF;
+	#END_REGION
+	
+	#REGION CONFIG_CHANNEL_WATCHDOG
+		// Config Channel Watchdog für Flash-Kommandos
+		IF #Axis.ConfigChannelBusy OR (#Axis.PlcToDrv.CfgControlWord <> 0) THEN
+		    IF (#Axis.PlcToDrv.CfgControlWord = 16#3000) // Reboot
+		        OR (#Axis.PlcToDrv.CfgControlWord = 16#4001) // Flash CT
+		        OR (#Axis.PlcToDrv.CfgControlWord = 16#8001) // Flash Curves
+		        OR (#Axis.PlcToDrv.CfgControlWord = 16#0001) // Polling
+		    THEN
+		        #TON_WD(IN := TRUE, PT := T#180s);
+		    ELSE
+		        #TON_WD(IN := TRUE, PT := T#5s);
+		    END_IF;
+		END_IF;
+		
+		IF NOT (#uiCfgRWLastCmd = #Axis.PlcToDrv.CfgControlWord) OR NOT #Axis.ConfigChannelBusy THEN
+		    #TON_WD(IN := FALSE, PT := T#10s);
+		END_IF;
+		#uiCfgRWLastCmd := #Axis.PlcToDrv.CfgControlWord;
+		
+		IF #TON_WD.Q THEN
+		    #Axis.PlcToDrv.CfgControlWord := 0; // Reset config command
+		END_IF;
+	#END_REGION
+	
+	#REGION OUTPUT_MAPPING
+		// Mapping der strukturierten Daten zu Word Arrays für Drive
+		#ST_LinMotPlcToDrv."PlcToDrv[0]" := #Axis.PlcToDrv.ControlWord;
+		#ST_LinMotPlcToDrv."PlcToDrv[1]" := #Axis.PlcToDrv.MCHeader;
+		#ST_LinMotPlcToDrv."PlcToDrv[2]" := #Axis.PlcToDrv.MCParaWord0;
+		#ST_LinMotPlcToDrv."PlcToDrv[3]" := #Axis.PlcToDrv.MCParaWord1;
+		#ST_LinMotPlcToDrv."PlcToDrv[4]" := #Axis.PlcToDrv.MCParaWord2;
+		#ST_LinMotPlcToDrv."PlcToDrv[5]" := #Axis.PlcToDrv.MCParaWord3;
+		#ST_LinMotPlcToDrv."PlcToDrv[6]" := #Axis.PlcToDrv.MCParaWord4;
+		#ST_LinMotPlcToDrv."PlcToDrv[7]" := #Axis.PlcToDrv.MCParaWord5;
+		#ST_LinMotPlcToDrv."PlcToDrv[8]" := #Axis.PlcToDrv.MCParaWord6;
+		#ST_LinMotPlcToDrv."PlcToDrv[9]" := #Axis.PlcToDrv.MCParaWord7;
+		#ST_LinMotPlcToDrv."PlcToDrv[10]" := #Axis.PlcToDrv.MCParaWord8;
+		#ST_LinMotPlcToDrv."PlcToDrv[11]" := #Axis.PlcToDrv.MCParaWord9;
+		
+		// Config Channel Outputs
+		#ST_LinMotPlcToDrv."PlcToDrv[12]" := #Axis.PlcToDrv.CfgControlWord;
+		#ST_LinMotPlcToDrv."PlcToDrv[13]" := #Axis.PlcToDrv.CfgIndexOut;
+		#ST_LinMotPlcToDrv."PlcToDrv[14]" := DWORD_TO_WORD(#Axis.PlcToDrv.CfgValueOut);
+		#ST_LinMotPlcToDrv."PlcToDrv[15]" := DWORD_TO_WORD(ROR(IN := #Axis.PlcToDrv.CfgValueOut, N := 16));
+	#END_REGION
+
+END_FUNCTION_BLOCK

@@ -1,0 +1,41 @@
+﻿FUNCTION_BLOCK "LMct_RdAxisCom_PN"
+TITLE = LMct_RdAxisCom_PN
+{ S7_Optimized_Access := 'TRUE' }
+AUTHOR : fj
+//This function block reads the input data and puts it to the axis reference (tstLM_Axis).
+//Should be called at the beginning of the PLC cycle or at least before all other library function blocks.
+//- Recommended for Profinet
+   VAR_INPUT 
+      AdrAxis : HW_SUBMODULE;
+   END_VAR
+
+   VAR_IN_OUT 
+      Axis : "tstLM_Axis";   // Axis reference
+   END_VAR
+
+   VAR 
+      DrvToPlc { ExternalAccessible := 'False'; ExternalVisible := 'False'; ExternalWritable := 'False'} : Array[0..12] of Word;
+   END_VAR
+
+   VAR_TEMP 
+      RET_VAL : Int;
+   END_VAR
+
+
+BEGIN
+	IF NOT (#AdrAxis = 0) THEN
+	  //Default Inputs
+	  #Axis.DrvToPlc.StateVar           := #DrvToPlc[0];
+	  #Axis.DrvToPlc.StatusWord         := #DrvToPlc[1];
+	  #Axis.DrvToPlc.WarnWord           := #DrvToPlc[2];
+	  #Axis.DrvToPlc.ComDemandPosition  := DWORD_TO_DINT(ROR(IN:=WORD_TO_DWORD(#DrvToPlc[4]), N:=16) + WORD_TO_DWORD(#DrvToPlc[3]));
+	  #Axis.DrvToPlc.ComActualPosition  := DWORD_TO_DINT(ROR(IN:=WORD_TO_DWORD(#DrvToPlc[6]), N:=16) + WORD_TO_DWORD(#DrvToPlc[5]));
+	  #Axis.DrvToPlc.ComActualCurrent32 := DWORD_TO_DINT(ROR(IN:=WORD_TO_DWORD(#DrvToPlc[8]), N:=16) + WORD_TO_DWORD(#DrvToPlc[7]));
+	  //Config Inputs
+	  #Axis.DrvToPlc.CfgStatusWord      := #DrvToPlc[9];
+	  #Axis.DrvToPlc.CfgIndexIn         := #DrvToPlc[10];
+	  #Axis.DrvToPlc.CfgValueIn         := ROR(IN:=WORD_TO_DWORD(#DrvToPlc[12]), N:=16) + WORD_TO_DWORD(#DrvToPlc[11]);
+	END_IF;
+	
+END_FUNCTION_BLOCK
+

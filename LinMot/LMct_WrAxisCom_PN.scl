@@ -1,0 +1,49 @@
+﻿FUNCTION_BLOCK "LMct_WrAxisCom_PN"
+TITLE = LMct_WrAxisCom_PN
+{ S7_Optimized_Access := 'TRUE' }
+AUTHOR : fj
+//This function block reads the output data of the axis reference (tstLM_Axis), prepares and writes them to the output address.
+//- Recommended for Profinet
+   VAR_INPUT 
+      AdrAxis : HW_SUBMODULE;
+   END_VAR
+
+   VAR_IN_OUT 
+      Axis : "tstLM_Axis";   // Axis reference
+   END_VAR
+
+   VAR 
+      PlcToDrv { ExternalAccessible := 'False'; ExternalVisible := 'False'; ExternalWritable := 'False'} : Array[0..15] of Word;
+   END_VAR
+
+   VAR_TEMP 
+      RET_VAl : Int;
+   END_VAR
+
+
+BEGIN
+	IF NOT (#AdrAxis = 0) THEN
+	  //Default outputs
+	  #PlcToDrv[0] := #Axis.PlcToDrv.ControlWord;
+	  #PlcToDrv[1] := #Axis.PlcToDrv.MCHeader;
+	  #PlcToDrv[2] := #Axis.PlcToDrv.MCParaWord0;
+	  #PlcToDrv[3] := #Axis.PlcToDrv.MCParaWord1;
+	  #PlcToDrv[4] := #Axis.PlcToDrv.MCParaWord2;
+	  #PlcToDrv[5] := #Axis.PlcToDrv.MCParaWord3;
+	  #PlcToDrv[6] := #Axis.PlcToDrv.MCParaWord4;
+	  #PlcToDrv[7] := #Axis.PlcToDrv.MCParaWord5;
+	  #PlcToDrv[8] := #Axis.PlcToDrv.MCParaWord6;
+	  #PlcToDrv[9] := #Axis.PlcToDrv.MCParaWord7;
+	  #PlcToDrv[10] := #Axis.PlcToDrv.MCParaWord8;
+	  #PlcToDrv[11] := #Axis.PlcToDrv.MCParaWord9;
+	
+	  //Config outputs
+	  #PlcToDrv[12] := #Axis.PlcToDrv.CfgControlWord;
+	  #PlcToDrv[13] := #Axis.PlcToDrv.CfgIndexOut;
+	  #PlcToDrv[14] := DWORD_TO_WORD(#Axis.PlcToDrv.CfgValueOut);
+	  #PlcToDrv[15] := DWORD_TO_WORD(ROR(IN:=#Axis.PlcToDrv.CfgValueOut, N:=16));  
+	  
+	END_IF;
+	 
+END_FUNCTION_BLOCK
+

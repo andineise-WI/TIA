@@ -1,0 +1,490 @@
+FUNCTION_BLOCK "FB_LinMot_Advanced"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      ip_Maschine : Int := 1;               // Maschinennummer für Program_Alarm
+      ip_Station : Int;                     // Stationsnummer für Program_Alarm
+      ip_Bmk : String[30];                  // Begleitwert für Program_Alarm
+      i_StoerungQuittieren : Bool;          // Stoerung quittieren
+      i_NotHalt_IO : Bool;                  // Steuerung Ein (Power-ON Bedingung)
+      i_Sicherheitskreis_IO : Bool;         // Sicherheitskreis OK
+      i_FreigabeBewegung : Bool;            // Bewegungsfreigabe
+      i_FreigabeHMI : Bool;                 // HMI-Bedienung freigeben
+      i_LinMot_DrvToPlc : "ST_LinMotDrvToPlc";  // Eingangsdaten vom LinMot
+   END_VAR
+
+   VAR_OUTPUT 
+      q_LinMot_PlcToDrv : "ST_LinMotPlcToDrv";  // Ausgangsdaten zum LinMot
+      q_LinMotReady : Bool;                 // LinMot ist betriebsbereit
+   END_VAR
+
+   VAR_IN_OUT 
+      LinMot_HMI : "ST_LinMot_Advanced_HMI";    // HMI-Schnittstelle
+      iq_Stoermeldeindikator : Bool;        // Stoermelder
+   END_VAR
+
+   VAR 
+      // Zustandsvariablen entsprechend REGION-Struktur
+      power_on_state : Int;                 // Power ON Zustandsmaschine
+      home_state : Int;                     // Referenzfahrt Zustandsmaschine
+      move_state : Int;                     // Bewegung Zustandsmaschine  
+      halt_state : Int;                     // Halt Zustandsmaschine
+      reset_state : Int;                    // Reset Zustandsmaschine
+      error_state : Int;                    // Fehlerstatus (1-99)
+      
+      // Hilfsmerkbits
+      hmPowerEnabled : Bool;                // Power ist eingeschaltet
+      hmAxisHomed : Bool;                   // Achse ist referenziert
+      hmAxisInMotion : Bool;                // Achse in Bewegung
+      hmAxisError : Bool;                   // Achse im Fehlerzustand
+      
+      // Flankenauswertung für HMI-Befehle
+      rtrig_SwitchOn : R_TRIG;
+      rtrig_Home : R_TRIG;
+      rtrig_Execute : R_TRIG;
+      rtrig_ErrorAck : R_TRIG;
+      
+      // Parameter-Änderungserkennung
+      position_old : Real;
+      velocity_old : Real;
+      acceleration_old : Real;
+      deceleration_old : Real;
+      
+      // Interne Variablen für LinMot-spezifische Berechnungen
+      uiCState : UInt;                      // Aktueller Controller-Status
+      usiOldCmdCount : USInt;               // Alter Befehlszähler
+      usiNewCmdCount : USInt;               // Neuer Befehlszähler
+      uiCmdHeader : UInt;                   // Befehlsheader
+      udiTmpDWord : UDInt;                  // Temporäre Variable für Berechnungen
+   END_VAR
+   
+   VAR DB_SPECIFIC
+      // Timer entsprechend Template
+      wthDog : TON_TIME;                    // Watchdog für kritische Vorgänge
+      tmr_Power : TON_TIME;                 // Timer für Power-ON
+      tmr_Home : TON_TIME;                  // Timer für Referenzfahrt
+      tmr_Move : TON_TIME;                  // Timer für Bewegungen
+      tmr_Config : TON_TIME;                // Timer für Konfiguration
+   END_VAR
+   
+   VAR 
+      // Program_Alarm Integration entsprechend Template
+      iDB_BasisMappingProgramAlarm : "FB_BasisMappingProgramAlarm";
+      Meldungen_LinMot : Program_Alarm;
+   END_VAR
+
+   VAR CONSTANT 
+      // LinMot-spezifische Konstanten
+      CON_CMD_HEADER_HOME : UInt := 16#0000;       // Home Command
+      CON_CMD_HEADER_MOVE : UInt := 16#0110;       // Move Absolute Command
+      CON_CMD_HEADER_HALT : UInt := 16#0170;       // Halt Command
+      CON_AXIS_STATE_DISABLED : UInt := 16#01;
+      CON_AXIS_STATE_STANDSTILL : UInt := 16#02;
+      CON_AXIS_STATE_ERRORSTOP : UInt := 16#04;
+      CON_AXIS_STATE_OPERATION : UInt := 16#08;
+   END_VAR
+
+BEGIN
+(*
+version |   Datum   | Autor       | Kommentar
+--------|-----------|-------------|--------------------------------------------------
+v0.1    |17.09.2025 | w011247@WI  | Erste Erstellung nach Template basierend auf LinMot-Funktionen
+--------|-----------|-------------|--------------------------------------------------
+
+--- Kurzbeschreibung ---
+Funktionsbaustein für LinMot Linearmotor. Integriert Power-Kontrolle, Referenzfahrt,
+absolute Positionierung, Halt-Funktion und Reset entsprechend LinMot-Protokoll.
+
+--- Abhängig von ---
+ST_LinMotDrvToPlc, ST_LinMotPlcToDrv, ST_LinMot_Advanced_HMI
+FB_BasisMappingProgramAlarm, Program_Alarm
+
+--- Fehlercodes (error_state) ---
+1: Power-ON Timeout
+2: Referenzfahrt Timeout  
+3: Bewegung Timeout
+4: Halt Timeout
+5: Reset Timeout
+6: Konfigurationsfehler
+7: Achse nicht bereit
+8: Fatal Error (Bit 12 gesetzt)
+9: Ungueltige Parameter
+*)
+
+    REGION Prüfung Parameteränderungen
+        // Überwachung der HMI-Parameter auf Änderungen
+        IF #LinMot_HMI.Position <> #position_old THEN
+            #position_old := #LinMot_HMI.Position;
+            // Parameter wurde geändert - eventuell Datenübertragung erforderlich
+        END_IF;
+        
+        IF #LinMot_HMI.Velocity <> #velocity_old THEN
+            #velocity_old := #LinMot_HMI.Velocity;
+        END_IF;
+        
+        IF #LinMot_HMI.Acceleration <> #acceleration_old THEN
+            #acceleration_old := #LinMot_HMI.Acceleration;
+        END_IF;
+        
+        IF #LinMot_HMI.Deceleration <> #deceleration_old THEN
+            #deceleration_old := #LinMot_HMI.Deceleration;
+        END_IF;
+    END_REGION
+
+    REGION Zeitüberwachungen
+        // Timer für verschiedene Operationen entsprechend LinMot-Original
+        // Power-ON Timer
+        #tmr_Power(IN := #power_on_state > 0 AND #power_on_state < 100,
+                   PT := T#5S);
+        
+        // Referenzfahrt Timer
+        #tmr_Home(IN := #home_state > 0 AND #home_state < 100,
+                  PT := T#30S);
+        
+        // Bewegungs Timer
+        #tmr_Move(IN := #move_state > 0 AND #move_state < 100,
+                  PT := T#60S);
+        
+        // Konfigurations-Watchdog (wie in LMct_Power)
+        #tmr_Config(IN := #LinMot_HMI.ConfigChannelBusy OR (#q_LinMot_PlcToDrv."PlcToDrv[15]" <> 0),
+                    PT := T#5S);
+    END_REGION
+
+    REGION Flankenerkennung
+        // R_TRIG für alle HMI-Befehle
+        #rtrig_SwitchOn(CLK := #LinMot_HMI.SwitchOn);
+        #rtrig_Home(CLK := #LinMot_HMI.Home);
+        #rtrig_Execute(CLK := #LinMot_HMI.Execute);
+        #rtrig_ErrorAck(CLK := #LinMot_HMI.ErrorAcknowledge);
+    END_REGION
+
+    REGION Eingangsdaten vom LinMot verarbeiten
+        // Controller-Status extrahieren (wie in LinMot-Original)
+        #uiCState := SHR(IN := #i_LinMot_DrvToPlc."DrvToPlc[0]", N := 8);
+        #usiOldCmdCount := SHR(IN := UINT_TO_USINT(SHL(IN := #i_LinMot_DrvToPlc."DrvToPlc[0]", N := 4)), N := 4);
+        
+        // Status-Bits aus DrvToPlc in HMI übertragen
+        #LinMot_HMI.Status.OperationEnabled := (#uiCState = CON_AXIS_STATE_OPERATION);
+        #LinMot_HMI.Status.Error := (#uiCState = CON_AXIS_STATE_ERRORSTOP);
+        #LinMot_HMI.Status.Homed := #i_LinMot_DrvToPlc."DrvToPlc[1]".%X11;
+        #LinMot_HMI.Status.MotionActive := #i_LinMot_DrvToPlc."DrvToPlc[1]".%X13;
+        #LinMot_HMI.Status.Warning := #i_LinMot_DrvToPlc."DrvToPlc[1]".%X7;
+        
+        // Ist-Position und Strom berechnen (vereinfacht)
+        #LinMot_HMI.Status.ActualPosition := DINT_TO_LREAL(UINT_TO_DINT(#i_LinMot_DrvToPlc."DrvToPlc[2]")) / #LinMot_HMI.Config.UnitScale;
+        #LinMot_HMI.Status.DemandPosition := DINT_TO_LREAL(UINT_TO_DINT(#i_LinMot_DrvToPlc."DrvToPlc[3]")) / #LinMot_HMI.Config.UnitScale;
+        
+        // Fehlercode extrahieren
+        IF #LinMot_HMI.Status.Error THEN
+            #LinMot_HMI.Status.ErrorCode := #i_LinMot_DrvToPlc."DrvToPlc[0]" AND 16#00FF;
+        ELSE
+            #LinMot_HMI.Status.ErrorCode := 0;
+        END_IF;
+        
+        // Hilfsmerkbits setzen
+        #hmPowerEnabled := #LinMot_HMI.Status.OperationEnabled;
+        #hmAxisHomed := #LinMot_HMI.Status.Homed;
+        #hmAxisInMotion := #LinMot_HMI.Status.MotionActive;
+        #hmAxisError := #LinMot_HMI.Status.Error;
+    END_REGION
+
+    REGION Reset-Behandlung
+        // Reset-Behandlung für alle Zustandsmaschinen
+        IF #rtrig_ErrorAck.Q OR #i_StoerungQuittieren THEN
+            #power_on_state := 0;
+            #home_state := 0;
+            #move_state := 0;
+            #halt_state := 0;
+            #reset_state := 1;  // Reset-Sequenz starten
+            #error_state := 0;
+        END_IF;
+        
+        // Reset-Zustandsmaschine (basierend auf LMct_Reset)
+        IF #reset_state > 0 THEN
+            CASE #reset_state OF
+                1: // Fehler-Reset senden
+                    #LinMot_HMI.Status.Busy := TRUE;
+                    IF #hmAxisError THEN
+                        // Fehlerbit togglen
+                        #q_LinMot_PlcToDrv."PlcToDrv[0]".%X7 := NOT #q_LinMot_PlcToDrv."PlcToDrv[0]".%X7;
+                        #reset_state := 2;
+                    ELSE
+                        #reset_state := 100; // Direkt fertig wenn kein Fehler
+                    END_IF;
+                    
+                2: // Warten auf Fehlerquittierung
+                    IF NOT #hmAxisError THEN
+                        #q_LinMot_PlcToDrv."PlcToDrv[0]".%X7 := FALSE;
+                        #reset_state := 100;
+                    ELSIF #tmr_Config.Q THEN
+                        #error_state := 5;
+                        #reset_state := -1;
+                    END_IF;
+                    
+                100: // Reset abgeschlossen
+                    #LinMot_HMI.Status.Done := TRUE;
+                    #LinMot_HMI.Status.Busy := FALSE;
+                    #LinMot_HMI.ErrorAcknowledge := FALSE; // Auto-Reset
+                    #reset_state := 0;
+                    
+                -1: // Reset-Fehler
+                    #LinMot_HMI.Status.Busy := FALSE;
+                    #LinMot_HMI.Status.Done := FALSE;
+                    #reset_state := 0;
+            END_CASE;
+        END_IF;
+    END_REGION
+
+    REGION Power ON LinMot
+        IF #i_NotHalt_IO AND #i_Sicherheitskreis_IO THEN
+            CASE #power_on_state OF
+                0: // Idle - Warten auf SwitchOn
+                    IF #rtrig_SwitchOn.Q AND NOT #hmAxisError THEN
+                        #LinMot_HMI.Status.Busy := TRUE;
+                        #LinMot_HMI.Status.Done := FALSE;
+                        #power_on_state := 1;
+                    END_IF;
+                    
+                1: // Power aktivieren
+                    // ControlWord-Bits setzen (basierend auf LMct_Power)
+                    #q_LinMot_PlcToDrv."PlcToDrv[0]".%X0 := TRUE;  // Switch On
+                    #q_LinMot_PlcToDrv."PlcToDrv[0]".%X2 := TRUE;  // /Quick Stop
+                    #q_LinMot_PlcToDrv."PlcToDrv[0]".%X3 := TRUE;  // Enable Operation
+                    
+                    IF #hmPowerEnabled THEN
+                        #power_on_state := 100;
+                    ELSIF #tmr_Power.Q THEN
+                        #error_state := 1;
+                        #power_on_state := -1;
+                    END_IF;
+                    
+                100: // Normal-Betrieb
+                    #LinMot_HMI.Status.Done := TRUE;
+                    #LinMot_HMI.Status.Busy := FALSE;
+                    
+                    // Überwachung - bei Störung in Fehler
+                    IF #hmAxisError THEN
+                        #power_on_state := -1;
+                    END_IF;
+                    
+                -1: // Power-Fehler
+                    #q_LinMot_PlcToDrv."PlcToDrv[0]".%X0 := FALSE; // Switch On aus
+                    #LinMot_HMI.Status.Busy := FALSE;
+                    #LinMot_HMI.Status.Done := FALSE;
+                    #power_on_state := 0;
+            END_CASE;
+        ELSE
+            // Sicherheit nicht OK - Power abschalten
+            #power_on_state := 0;
+            #q_LinMot_PlcToDrv."PlcToDrv[0]".%X0 := FALSE;
+            #LinMot_HMI.Status.Busy := FALSE;
+        END_IF;
+    END_REGION
+
+    REGION Referenzfahrt LinMot
+        IF #power_on_state = 100 AND #rtrig_Home.Q AND NOT #hmAxisError THEN
+            #home_state := 1;
+        END_IF;
+        
+        IF #home_state > 0 THEN
+            CASE #home_state OF
+                1: // Referenzfahrt starten
+                    #LinMot_HMI.AxisState := 5; // Homing_LM
+                    #LinMot_HMI.Status.Busy := TRUE;
+                    #LinMot_HMI.Status.Done := FALSE;
+                    
+                    // Home-Bit setzen (basierend auf LMct_Home)
+                    #q_LinMot_PlcToDrv."PlcToDrv[0]".%X11 := TRUE;
+                    #q_LinMot_PlcToDrv."PlcToDrv[6]" := CON_CMD_HEADER_HOME; // MCHeader Reset
+                    #home_state := 2;
+                    
+                2: // Warten auf Referenzfahrt-Ende
+                    IF #i_LinMot_DrvToPlc."DrvToPlc[0]" = 16#090F THEN
+                        #q_LinMot_PlcToDrv."PlcToDrv[0]".%X11 := FALSE;
+                        #home_state := 3;
+                    ELSIF #tmr_Home.Q THEN
+                        #error_state := 2;
+                        #home_state := -1;
+                    END_IF;
+                    
+                3: // Referenzfahrt prüfen
+                    IF #hmAxisHomed AND (#uiCState = CON_AXIS_STATE_OPERATION) THEN
+                        #LinMot_HMI.AxisState := 2; // StandStill_LM
+                        #home_state := 100;
+                    END_IF;
+                    
+                100: // Referenzfahrt abgeschlossen
+                    #LinMot_HMI.Status.Done := TRUE;
+                    #LinMot_HMI.Status.Busy := FALSE;
+                    #LinMot_HMI.Home := FALSE; // Auto-Reset
+                    #home_state := 0;
+                    
+                -1: // Referenzfahrt-Fehler
+                    #q_LinMot_PlcToDrv."PlcToDrv[0]".%X11 := FALSE;
+                    #LinMot_HMI.Status.Busy := FALSE;
+                    #LinMot_HMI.Status.Done := FALSE;
+                    #home_state := 0;
+            END_CASE;
+        END_IF;
+    END_REGION
+
+    REGION Bewegung LinMot
+        IF #power_on_state = 100 AND #hmAxisHomed AND #rtrig_Execute.Q AND NOT #hmAxisError THEN
+            #move_state := 1;
+        END_IF;
+        
+        IF #move_state > 0 THEN
+            CASE #move_state OF
+                1: // Parameter validieren und Bewegung vorbereiten
+                    #LinMot_HMI.AxisState := 6; // DiscreteMotion_LM
+                    #LinMot_HMI.Status.Busy := TRUE;
+                    #LinMot_HMI.Status.Done := FALSE;
+                    
+                    // Parameter-Plausibilität (basierend auf LMmt_MoveAbs)
+                    IF (#LinMot_HMI.Position * #LinMot_HMI.Config.UnitScale >= -2147483647.0 AND #LinMot_HMI.Position * #LinMot_HMI.Config.UnitScale <= 2147483647.0)
+                        AND (0 < #LinMot_HMI.Velocity AND #LinMot_HMI.Velocity * #LinMot_HMI.Config.UnitScale <= 42949672950.0)
+                        AND (0 < #LinMot_HMI.Acceleration AND #LinMot_HMI.Acceleration * #LinMot_HMI.Config.UnitScale <= 429496729500.0)
+                        AND (0 < #LinMot_HMI.Deceleration AND #LinMot_HMI.Deceleration * #LinMot_HMI.Config.UnitScale <= 429496729500.0)
+                    THEN
+                        #move_state := 2;
+                    ELSE
+                        #error_state := 9;
+                        #move_state := -1;
+                    END_IF;
+                    
+                2: // Bewegungsbefehl senden
+                    // Command Counter erhöhen
+                    #usiNewCmdCount := (#usiOldCmdCount + 1) MOD 16;
+                    #q_LinMot_PlcToDrv."PlcToDrv[6]" := CON_CMD_HEADER_MOVE + #usiNewCmdCount;
+                    
+                    // Position in LinMot-Format konvertieren
+                    #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT((#LinMot_HMI.Position - #LinMot_HMI.Status.DemandPosition) * #LinMot_HMI.Config.UnitScale));
+                    #q_LinMot_PlcToDrv."PlcToDrv[7]" := UDINT_TO_UINT(#udiTmpDWord);
+                    #q_LinMot_PlcToDrv."PlcToDrv[8]" := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+                    
+                    // Geschwindigkeit setzen
+                    #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#LinMot_HMI.Velocity * #LinMot_HMI.Config.UnitScale / 10));
+                    #q_LinMot_PlcToDrv."PlcToDrv[9]" := UDINT_TO_UINT(#udiTmpDWord);
+                    #q_LinMot_PlcToDrv."PlcToDrv[10]" := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+                    
+                    // Beschleunigung setzen
+                    #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#LinMot_HMI.Acceleration * #LinMot_HMI.Config.UnitScale / 100));
+                    #q_LinMot_PlcToDrv."PlcToDrv[11]" := UDINT_TO_UINT(#udiTmpDWord);
+                    #q_LinMot_PlcToDrv."PlcToDrv[12]" := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+                    
+                    // Verzögerung setzen
+                    #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#LinMot_HMI.Deceleration * #LinMot_HMI.Config.UnitScale / 100));
+                    #q_LinMot_PlcToDrv."PlcToDrv[13]" := UDINT_TO_UINT(#udiTmpDWord);
+                    #q_LinMot_PlcToDrv."PlcToDrv[14]" := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+                    
+                    #move_state := 3;
+                    
+                3: // Warten auf Bewegungsende
+                    IF NOT #hmAxisInMotion AND (#uiCState = CON_AXIS_STATE_OPERATION) THEN
+                        #LinMot_HMI.AxisState := 2; // StandStill_LM
+                        #move_state := 100;
+                    ELSIF #tmr_Move.Q THEN
+                        #error_state := 3;
+                        #move_state := -1;
+                    END_IF;
+                    
+                100: // Bewegung abgeschlossen
+                    #LinMot_HMI.Status.Done := TRUE;
+                    #LinMot_HMI.Status.Busy := FALSE;
+                    #LinMot_HMI.Execute := FALSE; // Auto-Reset
+                    #move_state := 0;
+                    
+                -1: // Bewegungs-Fehler
+                    #LinMot_HMI.Status.Busy := FALSE;
+                    #LinMot_HMI.Status.Done := FALSE;
+                    #move_state := 0;
+            END_CASE;
+        END_IF;
+    END_REGION
+
+    REGION LinMot Halt
+        // Halt-Funktion basierend auf LMmt_Halt (vereinfacht)
+        IF #halt_state = 0 AND #hmAxisInMotion AND #i_StoerungQuittieren THEN
+            #halt_state := 1;
+        END_IF;
+        
+        IF #halt_state > 0 THEN
+            CASE #halt_state OF
+                1: // Halt-Befehl senden
+                    #usiNewCmdCount := (#usiOldCmdCount + 1) MOD 16;
+                    #q_LinMot_PlcToDrv."PlcToDrv[6]" := CON_CMD_HEADER_HALT + #usiNewCmdCount;
+                    
+                    // Verzögerung setzen
+                    #udiTmpDWord := DINT_TO_UDINT(LREAL_TO_DINT(#LinMot_HMI.Deceleration * #LinMot_HMI.Config.UnitScale / 100));
+                    #q_LinMot_PlcToDrv."PlcToDrv[7]" := UDINT_TO_UINT(#udiTmpDWord);
+                    #q_LinMot_PlcToDrv."PlcToDrv[8]" := UDINT_TO_UINT(ROR(IN := #udiTmpDWord, N := 16));
+                    
+                    #halt_state := 2;
+                    
+                2: // Warten auf Stillstand
+                    IF NOT #hmAxisInMotion THEN
+                        #halt_state := 100;
+                    ELSIF #tmr_Config.Q THEN
+                        #error_state := 4;
+                        #halt_state := -1;
+                    END_IF;
+                    
+                100: // Halt abgeschlossen
+                    #halt_state := 0;
+                    
+                -1: // Halt-Fehler
+                    #halt_state := 0;
+            END_CASE;
+        END_IF;
+    END_REGION
+
+    REGION Ausgänge
+        // Geräte-Ready Signal
+        #q_LinMotReady := (#power_on_state = 100) AND #hmAxisHomed AND NOT #hmAxisError;
+        
+        // HMI-Status aggregieren
+        #LinMot_HMI.AxisState := #uiCState;
+        #LinMot_HMI.CommandAborted := FALSE; // TODO: Implementierung nach Bedarf
+        #LinMot_HMI.ConfigChannelBusy := (#q_LinMot_PlcToDrv."PlcToDrv[15]" <> 0);
+        
+        // Konfiguration initialisieren (wie in LMct_Power)
+        IF #LinMot_HMI.Config.ForceScale <= 0 THEN
+            #LinMot_HMI.Config.ForceScale := 0.1;
+        END_IF;
+        IF #LinMot_HMI.Config.PosScaleNumerator <= 0 THEN
+            #LinMot_HMI.Config.PosScaleNumerator := 10000;
+        END_IF;
+        IF #LinMot_HMI.Config.PosScaleDenominator <= 0 THEN
+            #LinMot_HMI.Config.PosScaleDenominator := 1;
+        END_IF;
+        #LinMot_HMI.Config.UnitScale := #LinMot_HMI.Config.PosScaleNumerator / #LinMot_HMI.Config.PosScaleDenominator;
+    END_REGION
+
+    REGION Fehlerhandling LinMot
+        // Program_Alarm Integration entsprechend Template
+        #iDB_BasisMappingProgramAlarm(
+            i_Signal := #error_state <> 0 OR #hmAxisError,
+            i_Maschine := #ip_Maschine,
+            i_Station := #ip_Station,
+            i_Bmk := #ip_Bmk,
+            i_FehlernummerObjekt := #error_state,
+            i_IstWarnung := FALSE,
+            iq_Meldung := #Meldungen_LinMot
+        );
+        
+        // Bei Störung alle Befehle zurücksetzen
+        IF #iDB_BasisMappingProgramAlarm.q_Stoerung THEN
+            #iq_Stoermeldeindikator := TRUE;
+            #LinMot_HMI.SwitchOn := FALSE;
+            #LinMot_HMI.Home := FALSE;
+            #LinMot_HMI.Execute := FALSE;
+        END_IF;
+        
+        // Quittierung
+        IF #i_StoerungQuittieren THEN
+            #error_state := 0;
+            #iq_Stoermeldeindikator := FALSE;
+        END_IF;
+    END_REGION
+
+END_FUNCTION_BLOCK
